@@ -24,21 +24,21 @@ from ..utils import create_embed, clean_text_for_match, format_number
 
 class RobloxCog(commands.Cog):
     """Roblox-related commands."""
-    
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-    
+
     # Create the command group
     roblox = app_commands.Group(name="roblox", description="Roblox-related tools")
-    
+
     # ══════════════════════════════════════════════════════════════════════════
     # GROUP INFO
     # ══════════════════════════════════════════════════════════════════════════
-    
+
     @roblox.command(name="group", description="Display information about Neroniel's Roblox Groups")
     async def group_info(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        
+
         async with aiohttp.ClientSession() as session:
             for group_id in ALL_GROUP_IDS:
                 try:
@@ -47,7 +47,7 @@ class RobloxCog(commands.Cog):
                         if resp.status != 200:
                             continue
                         data = await resp.json()
-                    
+
                     # Fetch icon
                     icon_url = None
                     try:
@@ -60,7 +60,7 @@ class RobloxCog(commands.Cog):
                                     icon_url = icon_data["data"][0]["imageUrl"]
                     except Exception:
                         pass
-                    
+
                     embed = create_embed()
                     embed.add_field(
                         name="Group Name",
@@ -73,7 +73,7 @@ class RobloxCog(commands.Cog):
                         inline=False,
                     )
                     embed.add_field(name="Group ID", value=str(data["id"]), inline=True)
-                    
+
                     owner = data.get("owner")
                     owner_link = (
                         f"[{owner['username']}](https://www.roblox.com/users/{owner['userId']}/profile)"
@@ -81,25 +81,25 @@ class RobloxCog(commands.Cog):
                     )
                     embed.add_field(name="Owner", value=owner_link, inline=True)
                     embed.add_field(name="Members", value=f"{data['memberCount']:,}", inline=True)
-                    
+
                     if icon_url:
                         embed.set_thumbnail(url=icon_url)
-                    
+
                     await interaction.followup.send(embed=embed)
                     await asyncio.sleep(0.5)
-                    
+
                 except Exception as e:
                     await interaction.followup.send(f"❌ Error fetching group {group_id}: {e}")
-    
+
     # ══════════════════════════════════════════════════════════════════════════
     # PROFILE
     # ══════════════════════════════════════════════════════════════════════════
-    
+
     @roblox.command(name="profile", description="View a player's profile")
     @app_commands.describe(user="Roblox username or user ID")
     async def profile(self, interaction: discord.Interaction, user: str):
         await interaction.response.defer()
-        
+
         try:
             async with aiohttp.ClientSession() as session:
                 # Resolve user
@@ -122,11 +122,11 @@ class RobloxCog(commands.Cog):
                             return await interaction.followup.send("❌ User not found.", ephemeral=True)
                         user_id = data["data"][0]["id"]
                         display_name = data["data"][0]["displayName"]
-                    
+
                     async with session.get(f"https://users.roblox.com/v1/users/{user_id}") as resp:
                         full_data = await resp.json()
                         username = full_data["name"]
-                
+
                 # Get presence
                 status = "Offline"
                 last_online = "N/A"
@@ -137,30 +137,30 @@ class RobloxCog(commands.Cog):
                     if resp.status == 200:
                         p = (await resp.json())["userPresences"][0]
                         presence_type = p.get("userPresenceType", 0)
-                        
+
                         if presence_type == 1:
                             status = "Online"
                         elif presence_type == 2:
                             status = "In Game"
                         elif presence_type == 3:
                             status = "In Studio"
-                        
+
                         if p.get("lastOnline"):
                             last_online = isoparse(p["lastOnline"]).astimezone(PH_TIMEZONE).strftime("%A, %d %B %Y • %I:%M %p")
-                
+
                 # Get avatar
                 thumb_url = f"https://thumbnails.roproxy.com/v1/users/avatar-headshot?userIds={user_id}&size=420x420&format=Png"
                 async with session.get(thumb_url) as resp:
                     image_url = (await resp.json())["data"][0]["imageUrl"]
-                
+
                 # Build embed
                 created_at = isoparse(full_data["created"])
                 created_unix = int(created_at.timestamp())
                 description = full_data.get("description") or "N/A"
-                
+
                 verified = full_data.get("hasVerifiedBadge", False)
                 emoji = Emojis.VERIFIED if verified else ""
-                
+
                 # Get friend counts
                 async with session.get(f"https://friends.roblox.com/v1/users/{user_id}/friends/count") as r1, \
                            session.get(f"https://friends.roblox.com/v1/users/{user_id}/followers/count") as r2, \
@@ -168,12 +168,12 @@ class RobloxCog(commands.Cog):
                     friends = (await r1.json()).get("count", 0)
                     followers = (await r2.json()).get("count", 0)
                     followings = (await r3.json()).get("count", 0)
-                
+
                 embed = create_embed(
                     title=display_name,
                     url=f"https://www.roblox.com/users/{user_id}/profile",
                 )
-                
+
                 embed.description = (
                     f"**@{username} {emoji} ({user_id})**\n"
                     f"**Account Created:** <t:{created_unix}:f>\n\n"
@@ -182,22 +182,22 @@ class RobloxCog(commands.Cog):
                     f"**Status:** {status}"
                     + (f" ({last_online})" if status == "Offline" and last_online != "N/A" else "")
                 )
-                
+
                 embed.set_thumbnail(url=image_url)
                 await interaction.followup.send(embed=embed)
-                
+
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-    
+
     # ══════════════════════════════════════════════════════════════════════════
     # AVATAR
     # ══════════════════════════════════════════════════════════════════════════
-    
+
     @roblox.command(name="avatar", description="Display a player's full-body avatar")
     @app_commands.describe(user="Roblox username or user ID")
     async def avatar(self, interaction: discord.Interaction, user: str):
         await interaction.response.defer()
-        
+
         try:
             async with aiohttp.ClientSession() as session:
                 # Resolve user
@@ -212,24 +212,24 @@ class RobloxCog(commands.Cog):
                         if not data["data"]:
                             return await interaction.followup.send("❌ User not found.", ephemeral=True)
                         user_id = data["data"][0]["id"]
-                
+
                 # Get avatar
                 thumb_url = f"https://thumbnails.roblox.com/v1/users/avatar?userIds={user_id}&size=420x420&format=Png&isCircular=false"
                 async with session.get(thumb_url) as resp:
                     data = await resp.json()
                     image_url = data["data"][0]["imageUrl"]
-                
+
                 embed = create_embed()
                 embed.set_image(url=image_url)
                 await interaction.followup.send(embed=embed)
-                
+
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-    
+
     # ══════════════════════════════════════════════════════════════════════════
     # STOCKS
     # ══════════════════════════════════════════════════════════════════════════
-    
+
     @roblox.command(name="stocks", description="Check Robux balances across all managed groups")
     async def stocks(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -322,37 +322,37 @@ class RobloxCog(commands.Cog):
         lines = []
 
         # ── Group Payout section ──
-        lines.append("**Group Payout**\n")
+        lines.append("**GROUP PAYOUT (Community Funds | Pending)**\n")
         for key, cfg in ROBLOX_GROUPS.items():
-            lines.append(f"**⌖ __{cfg['label']}__ Community Funds | Pending**")
+            lines.append(f"**⌖ __{cfg['label']}__**")
             lines.append(f"{fmt(f'{key}_funds')} | {fmt(f'{key}_pending')}")
 
         lines.append("")
 
         # ── Roblox Plus section ──
-        lines.append("**Roblox Plus**\n")
+        lines.append("**ROBLOX PLUS**\n")
         lines.append("**⌖ Neroniel Account Balance**")
         lines.append(fmt("account_balance"))
         lines.append(fmt("account_balance2"))
 
         embed = create_embed(description="\n".join(lines))
         await interaction.followup.send(embed=embed)
-    
+
     # ══════════════════════════════════════════════════════════════════════════
     # GAMEPASS
     # ══════════════════════════════════════════════════════════════════════════
-    
+
     @roblox.command(name="gamepass", description="Generate a direct Gamepass link")
     @app_commands.describe(id="The Roblox Gamepass ID", link="Roblox Creator Dashboard URL")
     async def gamepass(self, interaction: discord.Interaction, id: int = None, link: str = None):
         if id is not None and link is not None:
             await interaction.response.send_message("❌ Provide either ID or Link, not both.", ephemeral=True)
             return
-        
+
         if id is None and link is None:
             await interaction.response.send_message("❌ Provide a Gamepass ID or Link.", ephemeral=True)
             return
-        
+
         pass_id = id
         if link:
             match = re.search(r'/passes/(\d+)/', link)
@@ -361,17 +361,17 @@ class RobloxCog(commands.Cog):
             else:
                 await interaction.response.send_message("❌ Invalid Gamepass Link.", ephemeral=True)
                 return
-        
+
         base_url = f"https://www.roblox.com/game-pass/{pass_id}"
         embed = create_embed()
         embed.add_field(name="🔗 Link", value=f"`{base_url}`\n[View Gamepass]({base_url})", inline=False)
-        
+
         await interaction.response.send_message(embed=embed)
-    
+
     # ══════════════════════════════════════════════════════════════════════════
     # DEVEX
     # ══════════════════════════════════════════════════════════════════════════
-    
+
     @roblox.command(name="devex", description="Convert Robux ↔ USD using DevEx rate")
     @app_commands.describe(conversion_type="Choose conversion type", amount="Amount to convert")
     @app_commands.choices(conversion_type=[
@@ -387,9 +387,9 @@ class RobloxCog(commands.Cog):
         if amount <= 0:
             await interaction.response.send_message("❗ Enter a positive amount.", ephemeral=True)
             return
-        
+
         devex_rate = 0.0038
-        
+
         if conversion_type.value == "robux":
             usd = amount * devex_rate
             embed = create_embed(title="💎 DevEx: Robux → USD")
@@ -400,41 +400,41 @@ class RobloxCog(commands.Cog):
             embed = create_embed(title="💎 DevEx: USD → Robux")
             embed.description = f"Converting **${format_number(amount)} USD** at $0.0038/Robux"
             embed.add_field(name="Total Robux", value=f"{Emojis.ROBUX} **{format_number(robux)}**", inline=False)
-        
+
         await interaction.response.send_message(embed=embed)
-    
+
     # ══════════════════════════════════════════════════════════════════════════
     # TAX
     # ══════════════════════════════════════════════════════════════════════════
-    
+
     @roblox.command(name="tax", description="Calculate Roblox's 30% marketplace tax")
     @app_commands.describe(amount="Robux amount")
     async def tax(self, interaction: discord.Interaction, amount: int):
         if amount <= 0:
             await interaction.response.send_message("❗ Enter a positive amount.", ephemeral=True)
             return
-        
+
         after_tax = int(amount * 0.7)
         tax_amount = amount - after_tax
         price_to_get = int(amount / 0.7)
-        
+
         embed = create_embed(title="💰 Roblox Tax Calculator")
         embed.add_field(name="Original Amount", value=f"{Emojis.ROBUX} {amount:,}", inline=False)
         embed.add_field(name="After 30% Tax", value=f"{Emojis.ROBUX} {after_tax:,}", inline=True)
         embed.add_field(name="Tax Amount", value=f"{Emojis.ROBUX} {tax_amount:,}", inline=True)
         embed.add_field(name="Price to Get Full Amount", value=f"{Emojis.ROBUX} {price_to_get:,}", inline=False)
-        
+
         await interaction.response.send_message(embed=embed)
-    
+
     # ══════════════════════════════════════════════════════════════════════════
     # GAME
     # ══════════════════════════════════════════════════════════════════════════
-    
+
     @roblox.command(name="game", description="Get detailed game info")
     @app_commands.describe(id="Place ID or Game URL")
     async def game(self, interaction: discord.Interaction, id: str):
         await interaction.response.defer()
-        
+
         # Extract place ID
         place_id = None
         if id.isdigit():
@@ -443,10 +443,10 @@ class RobloxCog(commands.Cog):
             match = re.search(r'roblox\.com/games/(\d+)', id)
             if match:
                 place_id = int(match.group(1))
-        
+
         if not place_id:
             return await interaction.followup.send("❌ Invalid Place ID or URL.", ephemeral=True)
-        
+
         try:
             async with aiohttp.ClientSession() as session:
                 # Get universe ID
@@ -456,7 +456,7 @@ class RobloxCog(commands.Cog):
                     if resp.status != 200:
                         raise Exception("Invalid Place ID")
                     universe_id = (await resp.json()).get("universeId")
-                
+
                 # Get game info
                 async with session.get(
                     f"https://games.roblox.com/v1/games?universeIds={universe_id}"
@@ -464,28 +464,28 @@ class RobloxCog(commands.Cog):
                     data = await resp.json()
                     if not data.get("data"):
                         raise Exception("Game not found")
-                
+
                 game = data["data"][0]
-                
+
                 # Get votes
                 async with session.get(
                     f"https://games.roblox.com/v1/games/votes?universeIds={universe_id}"
                 ) as resp:
                     votes = (await resp.json())["data"][0] if resp.status == 200 else {}
-                
+
                 # Get thumbnail
                 async with session.get(
                     f"https://thumbnails.roblox.com/v1/games/icons?universeIds={universe_id}&size=150x150&format=Png"
                 ) as resp:
                     thumb_data = await resp.json()
                     thumbnail = thumb_data["data"][0]["imageUrl"] if thumb_data.get("data") else None
-                
+
                 # Build embed
                 creator = game.get("creator", {})
                 creator_name = creator.get("name", "Unknown")
-                
+
                 embed = create_embed()
-                
+
                 game_link = f"https://www.roblox.com/games/{place_id}"
                 embed.add_field(
                     name="", 
@@ -501,28 +501,28 @@ class RobloxCog(commands.Cog):
                     inline=True,
                 )
                 embed.add_field(name="Max Players", value=str(game.get("maxPlayers", "N/A")), inline=True)
-                
+
                 if thumbnail:
                     embed.set_thumbnail(url=thumbnail)
-                
+
                 await interaction.followup.send(embed=embed)
-                
+
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-    
+
     # ══════════════════════════════════════════════════════════════════════════
     # COMMUNITY SEARCH
     # ══════════════════════════════════════════════════════════════════════════
-    
+
     @roblox.command(name="community", description="Search public Roblox groups")
     @app_commands.describe(name="Name or ID")
     async def community(self, interaction: discord.Interaction, name: str):
         await interaction.response.defer()
-        
+
         try:
             async with aiohttp.ClientSession() as session:
                 group_id = None
-                
+
                 if name.isdigit():
                     group_id = int(name)
                 else:
@@ -532,34 +532,34 @@ class RobloxCog(commands.Cog):
                     ) as resp:
                         if resp.status != 200:
                             return await interaction.followup.send("❌ Search failed.", ephemeral=True)
-                        
+
                         data = await resp.json()
                         groups = data.get("data", [])
-                        
+
                         if not groups:
                             return await interaction.followup.send(f"❌ No group found: `{name}`", ephemeral=True)
-                        
+
                         # Find best match
                         clean_query = clean_text_for_match(name)
                         best_match = None
-                        
+
                         for group in groups:
                             if clean_text_for_match(group["name"]) == clean_query:
                                 best_match = group
                                 break
-                        
+
                         if not best_match:
                             candidates = [g for g in groups if clean_query in clean_text_for_match(g["name"])]
                             best_match = max(candidates, key=lambda g: g.get("memberCount", 0)) if candidates else groups[0]
-                        
+
                         group_id = best_match["id"]
-                
+
                 # Fetch group info
                 async with session.get(f"https://groups.roblox.com/v1/groups/{group_id}") as resp:
                     if resp.status != 200:
                         return await interaction.followup.send("❌ Group not found.", ephemeral=True)
                     group_data = await resp.json()
-                
+
                 # Fetch icon
                 icon_url = None
                 try:
@@ -572,7 +572,7 @@ class RobloxCog(commands.Cog):
                                 icon_url = data["data"][0]["imageUrl"]
                 except Exception:
                     pass
-                
+
                 embed = create_embed()
                 embed.add_field(
                     name="Group Name",
@@ -585,7 +585,7 @@ class RobloxCog(commands.Cog):
                     inline=False,
                 )
                 embed.add_field(name="Group ID", value=str(group_data["id"]), inline=True)
-                
+
                 owner = group_data.get("owner")
                 owner_link = (
                     f"[{owner['username']}](https://www.roblox.com/users/{owner['userId']}/profile)"
@@ -593,12 +593,12 @@ class RobloxCog(commands.Cog):
                 )
                 embed.add_field(name="Owner", value=owner_link, inline=True)
                 embed.add_field(name="Members", value=f"{group_data['memberCount']:,}", inline=True)
-                
+
                 if icon_url:
                     embed.set_thumbnail(url=icon_url)
-                
+
                 await interaction.followup.send(embed=embed)
-                
+
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
@@ -861,13 +861,13 @@ class RobloxCog(commands.Cog):
         await interaction.response.defer()
 
         groups = {
-            "1cy":      {"id": "5838002",     "cookie_env": "ROBLOX_COOKIE",  "name": "1cy",                    "url": "https://www.roblox.com/groups/5838002"},
-            "mc":       {"id": "1081179215",  "cookie_env": "ROBLOX_COOKIE2", "name": "Modded Corporations",    "url": "https://www.roblox.com/groups/1081179215"},
-            "sb":       {"id": "35341321",    "cookie_env": "ROBLOX_COOKIE2", "name": "Sheboyngo",              "url": "https://www.roblox.com/groups/35341321"},
-            "bsm":      {"id": "42939987",    "cookie_env": "ROBLOX_COOKIE2", "name": "Brazilian Spyder Market","url": "https://www.roblox.com/groups/42939987"},
-            "mpg":      {"id": "365820076",   "cookie_env": "ROBLOX_COOKIE2", "name": "MPG Studios",            "url": "https://www.roblox.com/groups/365820076"},
-            "cd":       {"id": "7411911",     "cookie_env": "ROBLOX_COOKIE2", "name": "Content Deleted",        "url": "https://www.roblox.com/groups/7411911"},
-            "neroniel": {"id": "11136234",    "cookie_env": "ROBLOX_COOKIE",  "name": "Neroniel",               "url": "https://www.roblox.com/groups/11136234"},
+            "1cy":      {"id": "5838002",     "cookie_env": "ROBLOX_COOKIE",  "name": "1cy",                     "url": "https://www.roblox.com/groups/5838002"},
+            "mc":       {"id": "1081179215",  "cookie_env": "ROBLOX_COOKIE2", "name": "Modded Corporations",     "url": "https://www.roblox.com/groups/1081179215"},
+            "sb":       {"id": "35341321",    "cookie_env": "ROBLOX_COOKIE2", "name": "Sheboyngo",               "url": "https://www.roblox.com/groups/35341321"},
+            "bsm":      {"id": "42939987",    "cookie_env": "ROBLOX_COOKIE2", "name": "Brazilian Spyder Market", "url": "https://www.roblox.com/groups/42939987"},
+            "mpg":      {"id": "365820076",   "cookie_env": "ROBLOX_COOKIE2", "name": "MPG Studios",             "url": "https://www.roblox.com/groups/365820076"},
+            "cd":       {"id": "7411911",     "cookie_env": "ROBLOX_COOKIE2", "name": "Content Deleted",         "url": "https://www.roblox.com/groups/7411911"},
+            "neroniel": {"id": "11136234",    "cookie_env": "ROBLOX_COOKIE",  "name": "Neroniel",                "url": "https://www.roblox.com/groups/11136234"},
         }
 
         cookies = {}
@@ -889,6 +889,22 @@ class RobloxCog(commands.Cog):
             return
 
         embed = create_embed()
+
+        def get_eligibility_status(join_date_str: str):
+            if not join_date_str:
+                return "<:Unverified:1446796507931082906> Not In Group"
+            try:
+                join_date = isoparse(join_date_str).replace(tzinfo=None)
+                now_utc = datetime.utcnow()
+                eligibility_date = join_date + timedelta(days=14)
+                if now_utc >= eligibility_date:
+                    return f"{Emojis.VERIFIED} Eligible"
+                days_left = (eligibility_date - now_utc).days
+                if days_left <= 0:
+                    return "<:Unverified:1446796507931082906> Not Currently Eligible (Eligible Today)"
+                return f"<:Unverified:1446796507931082906> Not Currently Eligible (Eligible in {days_left} day{'s' if days_left != 1 else ''})"
+            except Exception:
+                return "<:Unverified:1446796507931082906> Not Currently Eligible"
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -916,22 +932,6 @@ class RobloxCog(commands.Cog):
                 except Exception:
                     pass
 
-                def get_eligibility_status(join_date_str: str):
-                    if not join_date_str:
-                        return "<:Unverified:1446796507931082906> Not In Group"
-                    try:
-                        join_date = isoparse(join_date_str).replace(tzinfo=None)
-                        now_utc = datetime.utcnow()
-                        eligibility_date = join_date + timedelta(days=14)
-                        if now_utc >= eligibility_date:
-                            return f"{Emojis.VERIFIED} Eligible"
-                        days_left = (eligibility_date - now_utc).days
-                        if days_left <= 0:
-                            return "<:Unverified:1446796507931082906> Not Currently Eligible (Eligible Today)"
-                        return f"<:Unverified:1446796507931082906> Not Currently Eligible (Eligible in {days_left} day{'s' if days_left != 1 else ''})"
-                    except Exception:
-                        return "<:Unverified:1446796507931082906> Not Currently Eligible"
-
                 status_lines = []
                 community_role_name = None
 
@@ -942,21 +942,19 @@ class RobloxCog(commands.Cog):
                         group_display = info["name"]
                         group_url = info["url"]
                         is_member = False
-                        current_role_name = None
 
                         try:
                             async with s2.get(
                                 f"https://groups.roblox.com/v1/users/{user_id}/groups/roles"
                             ) as roles_resp:
                                 if roles_resp.status == 200:
-                                    roles_data = await roles_resp.json()
-                                    for entry in roles_data.get("data", []):
-                                        group_info = entry.get("group", {})
-                                        if group_info and str(group_info.get("id")) == group_id:
+                                    for entry in (await roles_resp.json()).get("data", []):
+                                        g = entry.get("group", {})
+                                        if g and str(g.get("id")) == group_id:
                                             is_member = True
-                                            current_role_name = entry.get("role", {}).get("name")
+                                            role_name = entry.get("role", {}).get("name")
                                             if key == "1cy":
-                                                community_role_name = current_role_name
+                                                community_role_name = role_name
                                             break
                         except Exception:
                             pass
@@ -967,8 +965,8 @@ class RobloxCog(commands.Cog):
                             eligibility_status_text = "<:Unverified:1446796507931082906> Not In Group"
                         else:
                             try:
-                                url = f"https://economy.roblox.com/v1/groups/{group_id}/users-payout-eligibility?userIds={user_id}"
-                                async with s2.get(url, headers={"Cookie": cookie}) as response:
+                                elig_url = f"https://economy.roblox.com/v1/groups/{group_id}/users-payout-eligibility?userIds={user_id}"
+                                async with s2.get(elig_url, headers={"Cookie": cookie}) as response:
                                     if response.status == 200:
                                         d = await response.json()
                                         eligibility = d.get("usersGroupPayoutEligibility", {}).get(str(user_id))
@@ -976,7 +974,80 @@ class RobloxCog(commands.Cog):
                                         if is_eligible_api:
                                             eligibility_status_text = f"{Emojis.VERIFIED} Eligible"
                                         else:
-                                            eligibility_status_text = "<:Unverified:1446796507931082906> Not Currently Eligible"
+                                            # Audit log fallback — find join date for days_left
+                                            join_date_str = None
+                                            found_join_log = False
+                                            cursor = None
+                                            audit_base = f"https://groups.roblox.com/v1/groups/{group_id}/audit-log"
+
+                                            while not found_join_log:
+                                                params = {"actionType": "JoinGroup", "limit": 100, "sortOrder": "Desc"}
+                                                if cursor:
+                                                    params["cursor"] = cursor
+                                                async with s2.get(audit_base, params=params, headers={"Cookie": cookie}) as audit_resp:
+                                                    if audit_resp.status != 200:
+                                                        break
+                                                    audit_data = await audit_resp.json()
+                                                    logs = audit_data.get("data", [])
+                                                    if not logs:
+                                                        break
+                                                    for log in logs:
+                                                        actor_user = log.get("actor", {}).get("user", {}) or {}
+                                                        actor_uid = actor_user.get("userId") or actor_user.get("id")
+                                                        if actor_uid == user_id:
+                                                            join_date_str = log.get("created")
+                                                            found_join_log = True
+                                                            break
+                                                    last_log = logs[-1] if logs else None
+                                                    if last_log:
+                                                        try:
+                                                            if isoparse(last_log.get("created", "")).replace(tzinfo=None) < (datetime.utcnow() - timedelta(days=15)):
+                                                                break
+                                                        except Exception:
+                                                            pass
+                                                    cursor = audit_data.get("nextPageCursor")
+                                                    if not cursor or found_join_log:
+                                                        break
+
+                                            if not join_date_str:
+                                                # Member list fallback
+                                                m_cursor = None
+                                                cutoff_date = datetime.utcnow() - timedelta(days=15)
+                                                found_in_members = False
+                                                while not found_in_members:
+                                                    params = {"sortOrder": "Desc", "limit": 100}
+                                                    if m_cursor:
+                                                        params["cursor"] = m_cursor
+                                                    async with s2.get(
+                                                        f"https://groups.roblox.com/v1/groups/{group_id}/users",
+                                                        params=params,
+                                                    ) as members_resp:
+                                                        if members_resp.status != 200:
+                                                            break
+                                                        members_data = await members_resp.json()
+                                                        members = members_data.get("data", [])
+                                                        if not members:
+                                                            break
+                                                        for member in members:
+                                                            user_obj = member.get("user", {})
+                                                            if user_obj and user_obj.get("id") == user_id:
+                                                                join_date_str = member.get("created")
+                                                                found_in_members = True
+                                                                break
+                                                            try:
+                                                                if isoparse(member.get("created", "")).replace(tzinfo=None) < cutoff_date:
+                                                                    found_in_members = True
+                                                                    break
+                                                            except Exception:
+                                                                pass
+                                                        m_cursor = members_data.get("nextPageCursor")
+                                                        if not m_cursor or found_in_members:
+                                                            break
+
+                                            eligibility_status_text = (
+                                                get_eligibility_status(join_date_str) if join_date_str
+                                                else "<:Unverified:1446796507931082906> Not Currently Eligible"
+                                            )
                                     else:
                                         eligibility_status_text = "⚠️ API Error"
                             except Exception:
