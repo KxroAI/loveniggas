@@ -323,13 +323,13 @@ class RobloxCog(commands.Cog):
 
         # ── Group Payout section ──
         for key, cfg in ROBLOX_GROUPS.items():
-            lines.append(f"**⌖ {cfg['label']}**")
+            lines.append(f"**⌖ __{cfg['label']}__**")
             lines.append(f"{fmt(f'{key}_funds')} | {fmt(f'{key}_pending')}")
 
         lines.append("")
 
         # ── Personal Accounts section ──
-        lines.append("**⌖ Neroniel Account Balance**")
+        lines.append("**⌖ __Neroniel__ Account Balance**")
         if all_visible.get("account_balance"):
             lines.append(fmt("account_balance"))
         if all_visible.get("account_balance2"):
