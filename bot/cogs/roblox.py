@@ -279,10 +279,10 @@ class RobloxCog(commands.Cog):
                 all_visible.update(visible)
                 await asyncio.sleep(0.3)
             
-            # Fetch personal account
+            # Fetch personal account 1
             roblox_stocks_cookie = os.getenv("ROBLOX_STOCKS")
             roblox_user_id = os.getenv("ROBLOX_STOCKS_ID")
-            
+
             if roblox_stocks_cookie and roblox_user_id:
                 try:
                     async with session.get(
@@ -296,22 +296,46 @@ class RobloxCog(commands.Cog):
                 except Exception:
                     all_data["account_balance"] = 0
                     all_visible["account_balance"] = False
-        
+
+            # Fetch personal account 2
+            roblox_stocks_cookie2 = os.getenv("ROBLOX_STOCKS2")
+            roblox_user_id2 = os.getenv("ROBLOX_STOCKS_ID2")
+
+            if roblox_stocks_cookie2 and roblox_user_id2:
+                try:
+                    async with session.get(
+                        f"https://economy.roblox.com/v1/users/{roblox_user_id2}/currency",
+                        headers={"Cookie": roblox_stocks_cookie2},
+                    ) as r:
+                        if r.status == 200:
+                            res = await r.json()
+                            all_data["account_balance2"] = res.get("robux", 0)
+                            all_visible["account_balance2"] = True
+                except Exception:
+                    all_data["account_balance2"] = 0
+                    all_visible["account_balance2"] = False
+
         # Build embed
         def fmt(key):
             return f"{Emojis.ROBUX} {all_data.get(key, 0):,}" if all_visible.get(key) else "||HIDDEN||"
-        
-        embed = create_embed()
-        
+
+        lines = []
+
+        # ── Group Payout section ──
+        lines.append("**Group Payout**\n")
         for key, cfg in ROBLOX_GROUPS.items():
-            embed.add_field(
-                name=f"**⌖ __{cfg['label']}__ Community Funds | Pending**",
-                value=f"{fmt(f'{key}_funds')} | {fmt(f'{key}_pending')}",
-                inline=False,
-            )
-        
-        embed.add_field(name="**⌖ Neroniel Account Balance**", value=fmt("account_balance"), inline=False)
-        
+            lines.append(f"**⌖ __{cfg['label']}__ Community Funds | Pending**")
+            lines.append(f"{fmt(f'{key}_funds')} | {fmt(f'{key}_pending')}")
+
+        lines.append("")
+
+        # ── Roblox Plus section ──
+        lines.append("**Roblox Plus**\n")
+        lines.append("**⌖ Neroniel Account Balance**")
+        lines.append(fmt("account_balance"))
+        lines.append(fmt("account_balance2"))
+
+        embed = create_embed(description="\n".join(lines))
         await interaction.followup.send(embed=embed)
     
     # ══════════════════════════════════════════════════════════════════════════
