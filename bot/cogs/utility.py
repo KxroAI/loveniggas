@@ -404,8 +404,7 @@ class UtilityCog(commands.Cog):
     # COMMAND LIST
     # ══════════════════════════════════════════════════════════════════════════
 
-    @app_commands.command(name="listallcommands", description="Display all available commands")
-    async def listallcommands(self, interaction: discord.Interaction):
+    def _build_help_embeds(self) -> list[discord.Embed]:
         categories = {
             "🤖 AI Assistant": [
                 "`/ask <prompt>` – Chat with Llama 3 AI",
@@ -470,18 +469,36 @@ class UtilityCog(commands.Cog):
                 "`/createinvite` – Generate invites for all servers (Owner)",
             ],
         }
-        
-        embeds = []
-        for title, cmds in categories.items():
-            embed = create_embed(title=title, description="\n".join(cmds))
-            embeds.append(embed)
-        
-        if not embeds:
-            await interaction.response.send_message("❌ No commands found.", ephemeral=True)
-            return
-        
+        return [
+            create_embed(title=title, description="\n".join(cmds))
+            for title, cmds in categories.items()
+        ]
+
+    @app_commands.command(name="listallcommands", description="Display all available commands")
+    async def listallcommands(self, interaction: discord.Interaction):
+        embeds = self._build_help_embeds()
         view = CommandPaginator(embeds)
         await interaction.response.send_message(embed=embeds[0], view=view)
+
+    @commands.command(name="help")
+    async def help_prefix(self, ctx: commands.Context):
+        embeds = self._build_help_embeds()
+        view = CommandPaginator(embeds)
+        await ctx.send(embed=embeds[0], view=view)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot:
+            return
+        stripped = message.content.strip()
+        mentioned_only = (
+            stripped == self.bot.user.mention
+            or stripped == f"<@!{self.bot.user.id}>"
+        )
+        if mentioned_only:
+            embeds = self._build_help_embeds()
+            view = CommandPaginator(embeds)
+            await message.channel.send(embed=embeds[0], view=view)
 
 
 async def setup(bot: commands.Bot):
