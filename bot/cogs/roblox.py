@@ -317,7 +317,7 @@ class RobloxCog(commands.Cog):
 
                 # Build embed
         def fmt(key):
-            return f":robux: {all_data.get(key, 0):,}" if all_visible.get(key) else "||HIDDEN||"
+            return f"{Emojis.ROBUX} {all_data.get(key, 0):,}" if all_visible.get(key) else "||HIDDEN||"
 
         lines = []
 
