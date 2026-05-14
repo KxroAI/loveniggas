@@ -315,27 +315,32 @@ class RobloxCog(commands.Cog):
                     all_data["account_balance2"] = 0
                     all_visible["account_balance2"] = False
 
-        # Build embed
+                # Build embed
         def fmt(key):
-            return f"{Emojis.ROBUX} {all_data.get(key, 0):,}" if all_visible.get(key) else "||HIDDEN||"
+            return f":robux: {all_data.get(key, 0):,}" if all_visible.get(key) else "||HIDDEN||"
 
         lines = []
 
         # ── Group Payout section ──
-        lines.append("**GROUP PAYOUT (Community Funds | Pending)**\n")
         for key, cfg in ROBLOX_GROUPS.items():
-            lines.append(f"**⌖ __{cfg['label']}__**")
+            lines.append(f"**⌖ {cfg['label']}**")
             lines.append(f"{fmt(f'{key}_funds')} | {fmt(f'{key}_pending')}")
 
         lines.append("")
 
-        # ── Roblox Plus section ──
-        lines.append("**ROBLOX PLUS**\n")
+        # ── Personal Accounts section ──
         lines.append("**⌖ Neroniel Account Balance**")
-        lines.append(fmt("account_balance"))
-        lines.append(fmt("account_balance2"))
+        if all_visible.get("account_balance"):
+            lines.append(fmt("account_balance"))
+        if all_visible.get("account_balance2"):
+            lines.append(fmt("account_balance2"))
 
         embed = create_embed(description="\n".join(lines))
+        
+        # Add bot avatar as thumbnail
+        if interaction.client.user.avatar:
+            embed.set_thumbnail(url=interaction.client.user.avatar.url)
+        
         await interaction.followup.send(embed=embed)
 
     # ══════════════════════════════════════════════════════════════════════════
