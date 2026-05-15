@@ -415,7 +415,7 @@ class UtilityCog(commands.Cog):
                 "`/roblox profile <user>` – View a player's profile",
                 "`/roblox game <id>` – Get game info",
                 "`/roblox stocks` – Check Robux balances",
-                "`/roblox rate` – Set Roblox group rates (Admin)",
+                "`/roblox rate` – Set global minimum conversion rates (Owner only)",
             ],
             "💱 Currency & Conversion": [
                 "`/payout <type> <amount>` – Convert Robux ↔ PHP (Payout rate)",
@@ -423,9 +423,11 @@ class UtilityCog(commands.Cog):
                 "`/nct <type> <amount>` – Convert Robux ↔ PHP (NCT rate)",
                 "`/ct <type> <amount>` – Convert Robux ↔ PHP (CT rate)",
                 "`/allrates <type> <amount>` – Compare all 4 rates at once",
-                "`/setrate` – Update server conversion rates (Admin)",
-                "`/resetrate` – Clear saved rates for this server (Admin)",
+                "`/setrate` – Update this server's active rates (Admin)",
+                "`/resetrate` – Clear active rates for this server (Admin)",
                 "`/convertcurrency <amount> <from> <to>` – Convert real-world currencies",
+                "`/viewrates` – View global minimums and all server rates (Owner only)",
+                "`/forceresetallrates` – Reset all servers' active rates to global minimums (Owner only)",
             ],
             "🛠️ Utility": [
                 "`/userinfo [user]` – View Discord account details",
