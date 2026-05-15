@@ -51,13 +51,22 @@ class LogCog(commands.Cog):
                 f"`{opt['name']}`: {opt.get('value', '')}" for opt in raw_options
             ) if raw_options else "None"
 
+            server_name = interaction.guild.name if interaction.guild else "Direct Message"
+            server_id   = f"`{interaction.guild.id}`" if interaction.guild else "`N/A`"
+            channel_name = (
+                interaction.channel.name
+                if interaction.guild and hasattr(interaction.channel, "name")
+                else "Direct Message"
+            )
+            channel_id = f"`{interaction.channel.id}`" if interaction.channel else "`N/A`"
+
             embed = create_embed(
                 title="📝 Command Used",
                 description=(
-                    f"**Command:** `/{cmd_name}`\n"
-                    f"**User:** {interaction.user.mention} (`{interaction.user.id}`)\n"
-                    f"**Server:** {interaction.guild.name if interaction.guild else 'DM'}\n"
-                    f"**Channel:** {interaction.channel.name if hasattr(interaction.channel, 'name') else 'DM'}\n"
+                    f"**Command:** ``/{cmd_name}``\n"
+                    f"**User:** {interaction.user.mention} (``{interaction.user.id}``)\n"
+                    f"**Server:** {server_name} ({server_id})\n"
+                    f"**Channel:** {channel_name} ({channel_id})\n"
                     f"**Arguments:**\n{args_str}"
                 ),
             )
