@@ -70,7 +70,7 @@ class ConversionCog(commands.Cog):
         rates = get_current_rates(str(interaction.guild.id))
         rate = rates["payout"]
         if rate is None:
-            await interaction.response.send_message("❌ Payout rate not set. An admin can set it with `/roblox rate`.", ephemeral=True)
+            await interaction.response.send_message("❌ Payout rate not set. An admin can set it with `/setrate`.", ephemeral=True)
             return
 
         is_robux_to_php = conversion_type.value == "robux_to_php"
@@ -107,7 +107,7 @@ class ConversionCog(commands.Cog):
         rates = get_current_rates(str(interaction.guild.id))
         rate = rates["gift"]
         if rate is None:
-            await interaction.response.send_message("❌ Gift rate not set. An admin can set it with `/roblox rate`.", ephemeral=True)
+            await interaction.response.send_message("❌ Gift rate not set. An admin can set it with `/setrate`.", ephemeral=True)
             return
 
         is_robux_to_php = conversion_type.value == "robux_to_php"
@@ -139,7 +139,7 @@ class ConversionCog(commands.Cog):
         rates = get_current_rates(str(interaction.guild.id))
         rate = rates["nct"]
         if rate is None:
-            await interaction.response.send_message("❌ NCT rate not set. An admin can set it with `/roblox rate`.", ephemeral=True)
+            await interaction.response.send_message("❌ NCT rate not set. An admin can set it with `/setrate`.", ephemeral=True)
             return
 
         is_robux_to_php = conversion_type.value == "robux_to_php"
@@ -176,7 +176,7 @@ class ConversionCog(commands.Cog):
         rates = get_current_rates(str(interaction.guild.id))
         rate = rates["ct"]
         if rate is None:
-            await interaction.response.send_message("❌ CT rate not set. An admin can set it with `/roblox rate`.", ephemeral=True)
+            await interaction.response.send_message("❌ CT rate not set. An admin can set it with `/setrate`.", ephemeral=True)
             return
 
         is_robux_to_php = conversion_type.value == "robux_to_php"
@@ -214,7 +214,7 @@ class ConversionCog(commands.Cog):
 
         any_set = any(v is not None for v in rates.values())
         if not any_set:
-            await interaction.response.send_message("❌ No rates set for this server. An admin can set them with `/roblox rate`.", ephemeral=True)
+            await interaction.response.send_message("❌ No rates set for this server. An admin can set them with `/setrate`.", ephemeral=True)
             return
 
         embed = create_embed(title="All Conversion Rates")
@@ -471,10 +471,36 @@ class ConversionCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            result = db.rates.delete_many({})
+            # Fetch global minimums to reset servers back to
+            global_doc = db.rates.find_one({"guild_id": "__global__"}) or {}
+            reset_fields = {"updated_at": datetime.now(PH_TIMEZONE)}
+            unset_fields = {}
+
+            for rate_key, min_key in [
+                ("payout_rate", "payout_min"),
+                ("gift_rate",   "gift_min"),
+                ("nct_rate",    "nct_min"),
+                ("ct_rate",     "ct_min"),
+            ]:
+                if min_key in global_doc:
+                    reset_fields[rate_key] = global_doc[min_key]
+                else:
+                    unset_fields[rate_key] = ""
+
+            update_op = {"$set": reset_fields}
+            if unset_fields:
+                update_op["$unset"] = unset_fields
+
+            result = db.rates.update_many({"guild_id": {"$ne": "__global__"}}, update_op)
+
+            has_mins = any(k in global_doc for k in ["payout_min", "gift_min", "nct_min", "ct_min"])
+            detail = (
+                "Active rates have been **reset to the global minimums** set by `/roblox rate`."
+                if has_mins else
+                "No global minimums found — active rates have been **cleared** (will show \"Not Set\")."
+            )
             await interaction.followup.send(
-                f"✅ Wiped rate data for **{result.deleted_count}** server(s). "
-                f"All conversion commands will now show \"Not Set\" until rates are re-configured via `/roblox rate`.",
+                f"✅ Reset active rates for **{result.modified_count}** server(s).\n{detail}",
                 ephemeral=True,
             )
         except Exception as e:
