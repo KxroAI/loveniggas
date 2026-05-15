@@ -455,11 +455,12 @@ class UtilityCog(commands.Cog):
                 "`/resetinvites <user>` – Reset a user's invite count (Admin)",
             ],
             "📱 Social": [
-                "`/tiktok <link>` – Convert TikTok link for embedding",
-                "`/instagram <link>` – Convert Instagram link for embedding",
+                "`/tiktok <link> [spoiler]` – Download and send a TikTok video directly",
+                "`/instagram <link> [spoiler]` – Convert Instagram post/reel to embeddable preview link",
                 "`/poll <question> <duration>` – Create a timed poll",
                 "`/remindme <duration> <note>` – Set a personal reminder",
-                "`/snipe` – Recover the last deleted message",
+                "`/snipe` – Show the last deleted message in this channel",
+                "`/editsnipe` – Show the last edited message in this channel",
                 "`/donate <user> <amount>` – Playfully donate Robux (cosmetic)",
             ],
             "🔧 Admin": [
