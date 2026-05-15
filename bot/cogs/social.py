@@ -3,8 +3,11 @@ Social Media Commands Cog
 Handles TikTok download, Instagram preview, and other social features.
 """
 
+import os
 import re
+import tempfile
 import discord
+import pyktok as pyk
 from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timedelta
@@ -20,50 +23,67 @@ class SocialCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.snipe_cache: dict[int, dict] = {}
+        self.editsnipe_cache: dict[int, dict] = {}
     
     # ══════════════════════════════════════════════════════════════════════════
     # TIKTOK
     # ══════════════════════════════════════════════════════════════════════════
     
-    @app_commands.command(name="tiktok", description="Download a TikTok video")
-    @app_commands.describe(link="TikTok video URL", spoiler="Mark as spoiler?")
+    @app_commands.command(name="tiktok", description="Download and share a TikTok video directly in Discord")
+    @app_commands.describe(link="The TikTok Video URL to Convert", spoiler="Should the video be sent as a spoiler?")
     async def tiktok(self, interaction: discord.Interaction, link: str, spoiler: bool = False):
-        # Convert to embeddable link
-        if "tiktok.com" not in link:
-            await interaction.response.send_message("❌ Invalid TikTok URL.", ephemeral=True)
-            return
-        
-        # Try to convert to vxtiktok for embedding
-        embed_link = link.replace("tiktok.com", "vxtiktok.com")
-        
-        embed = create_embed(
-            description=f"🎵 **TikTok Video**\n[Watch Video]({embed_link})"
-        )
-        
-        if spoiler:
-            embed.description = f"||{embed.description}||"
-        
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.defer(ephemeral=False)
+
+        original_dir = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                os.chdir(tmpdir)
+                pyk.save_tiktok(link, save_video=True)
+
+                video_files = [
+                    os.path.join(root, f)
+                    for root, _, files in os.walk(tmpdir)
+                    for f in files if f.lower().endswith(".mp4")
+                ]
+
+                if not video_files:
+                    await interaction.followup.send("❌ Failed to find TikTok video after download.")
+                    return
+
+                video_path = video_files[0]
+                filename = os.path.basename(video_path)
+                if spoiler:
+                    filename = f"SPOILER_{filename}"
+
+                await interaction.followup.send(
+                    file=discord.File(fp=video_path, filename=filename),
+                    ephemeral=False,
+                )
+        except Exception as e:
+            await interaction.followup.send(f"❌ An error occurred while processing the video: {e}")
+            print(f"[ERROR] {e}")
+        finally:
+            os.chdir(original_dir)
     
     # ══════════════════════════════════════════════════════════════════════════
     # INSTAGRAM
     # ══════════════════════════════════════════════════════════════════════════
     
-    @app_commands.command(name="instagram", description="Convert Instagram to embeddable link")
-    @app_commands.describe(link="Instagram post/reel URL")
-    async def instagram(self, interaction: discord.Interaction, link: str):
-        if "instagram.com" not in link:
-            await interaction.response.send_message("❌ Invalid Instagram URL.", ephemeral=True)
+    @app_commands.command(name="instagram", description="Convert an Instagram post/reel into an embeddable preview link")
+    @app_commands.describe(link="Instagram post or reel URL", spoiler="Should the video be sent as a spoiler?")
+    async def instagram(self, interaction: discord.Interaction, link: str, spoiler: bool = False):
+        match = re.search(r"instagram\.com/(p|reel)/([^/]+)/", link)
+        if not match:
+            await interaction.response.send_message("❌ Invalid Instagram post or reel link.", ephemeral=False)
             return
-        
-        # Convert to ddinstagram for embedding
-        embed_link = link.replace("instagram.com", "ddinstagram.com")
-        
-        embed = create_embed(
-            description=f"📸 **Instagram Post**\n[View Post]({embed_link})"
-        )
-        
-        await interaction.response.send_message(embed=embed)
+
+        short_code = match.group(2)
+        instagramez_link = f"https://instagramez.com/p/{short_code}"
+
+        message = f"[EmbedEZ]({instagramez_link})"
+        if spoiler:
+            message = f"||{message}||"
+        await interaction.response.send_message(message, ephemeral=False)
     
     # ══════════════════════════════════════════════════════════════════════════
     # POLL
@@ -146,41 +166,88 @@ class SocialCog(commands.Cog):
         """Cache deleted messages for snipe."""
         if message.author.bot:
             return
-        
+
         self.snipe_cache[message.channel.id] = {
+            "author": str(message.author),
             "content": message.content,
-            "author": message.author,
+            "timestamp": message.created_at,
             "attachments": [a.url for a in message.attachments],
-            "deleted_at": datetime.now(PH_TIMEZONE),
         }
-    
-    @app_commands.command(name="snipe", description="Recover the last deleted message")
+
+    @app_commands.command(name="snipe", description="Show the last deleted message in this channel")
     async def snipe(self, interaction: discord.Interaction):
-        cached = self.snipe_cache.get(interaction.channel.id)
-        
-        if not cached:
-            await interaction.response.send_message("❌ Nothing to snipe.", ephemeral=True)
+        channel_id = interaction.channel_id
+        if channel_id not in self.snipe_cache:
+            await interaction.response.send_message(
+                "❌ There are no recently deleted messages in this channel.",
+                ephemeral=True,
+            )
             return
-        
-        embed = create_embed()
-        embed.set_author(
-            name=str(cached["author"]),
-            icon_url=cached["author"].display_avatar.url,
+
+        msg_data = self.snipe_cache[channel_id]
+        author = msg_data["author"]
+        content = msg_data["content"] or "[No text content]"
+        attachments = msg_data["attachments"]
+
+        embed = discord.Embed(
+            description=content,
+            color=discord.Color.red(),
+            timestamp=msg_data["timestamp"],
         )
-        embed.description = cached["content"] or "*No text content*"
-        
-        if cached["attachments"]:
+        embed.set_author(name=author)
+        embed.set_footer(text="Neroniel | Deleted at:")
+
+        if attachments:
             embed.add_field(
                 name="Attachments",
-                value="\n".join(cached["attachments"][:5]),
+                value="\n".join([f"[Link]({url})" for url in attachments]),
                 inline=False,
             )
-        
-        deleted_unix = int(cached["deleted_at"].timestamp())
-        embed.set_footer(text=f"Deleted at <t:{deleted_unix}:f>")
-        
-        await interaction.response.send_message(embed=embed)
-    
+
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # EDITSNIPE
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @commands.Cog.listener()
+    async def on_message_edit(self, before: discord.Message, after: discord.Message):
+        """Cache edited messages for editsnipe."""
+        if before.author.bot:
+            return
+        if before.content == after.content:
+            return
+
+        self.editsnipe_cache[before.channel.id] = {
+            "author": str(before.author),
+            "before": before.content,
+            "after": after.content,
+            "timestamp": before.created_at,
+        }
+
+    @app_commands.command(name="editsnipe", description="Show the last edited message in this channel")
+    async def editsnipe(self, interaction: discord.Interaction):
+        channel_id = interaction.channel_id
+        if channel_id not in self.editsnipe_cache:
+            await interaction.response.send_message(
+                "❌ There are no recently edited messages in this channel.",
+                ephemeral=True,
+            )
+            return
+
+        msg_data = self.editsnipe_cache[channel_id]
+
+        embed = discord.Embed(
+            color=discord.Color.orange(),
+            timestamp=msg_data["timestamp"],
+        )
+        embed.set_author(name=msg_data["author"])
+        embed.add_field(name="Before", value=msg_data["before"] or "[No text content]", inline=False)
+        embed.add_field(name="After",  value=msg_data["after"]  or "[No text content]", inline=False)
+        embed.set_footer(text="Neroniel | Edited at:")
+
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+
     # ══════════════════════════════════════════════════════════════════════════
     # DONATE (FUN COMMAND)
     # ══════════════════════════════════════════════════════════════════════════
