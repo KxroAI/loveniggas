@@ -612,7 +612,7 @@ class RobloxCog(commands.Cog):
     # RATE (SET CONVERSION RATES)
     # ══════════════════════════════════════════════════════════════════════════
 
-    @roblox.command(name="rate", description="Set or view conversion rates for this server (Admin only)")
+    @roblox.command(name="rate", description="Set global minimum conversion rates (Bot Owner only)")
     @app_commands.describe(
         payout="PHP per 1,000 Robux — Payout rate",
         gift="PHP per 1,000 Robux — Gift rate",
@@ -631,12 +631,8 @@ class RobloxCog(commands.Cog):
         from ..utils import get_current_rates, format_php
         from ..config import Emojis
 
-        is_admin = (
-            interaction.user.id == BOT_OWNER_ID
-            or interaction.user.guild_permissions.administrator
-        )
-        if not is_admin:
-            await interaction.response.send_message("❌ You must be an administrator.", ephemeral=True)
+        if interaction.user.id != BOT_OWNER_ID:
+            await interaction.response.send_message("❌ Only the bot owner can use this command.", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -645,26 +641,23 @@ class RobloxCog(commands.Cog):
             await interaction.followup.send("❌ Database not connected.", ephemeral=True)
             return
 
-        guild_id = str(interaction.guild.id)
+        GLOBAL_KEY = "__global__"
 
-        # If no arguments, show current minimums and active rates
+        # If no arguments, show current global minimums
         if all(v is None for v in [payout, gift, nct, ct]):
-            doc = db.rates.find_one({"guild_id": guild_id}) or {}
-            embed = discord.Embed(title="📊 Rate Configuration", color=discord.Color.from_rgb(0, 0, 0))
+            doc = db.rates.find_one({"guild_id": GLOBAL_KEY}) or {}
+            embed = discord.Embed(title="📊 Global Minimum Rates", color=discord.Color.from_rgb(0, 0, 0))
             robux_formatted = "1,000"
 
-            def _show(rate_key, min_key):
-                rate_val = doc.get(rate_key)
-                min_val  = doc.get(min_key)
-                rate_str = f"{Emojis.PHP} {format_php(rate_val)}" if rate_val is not None else "—"
-                min_str  = f"{Emojis.PHP} {format_php(min_val)}"  if min_val  is not None else "Not Set"
-                return f"**Active:** {rate_str}\n**Minimum:** {min_str}"
+            def _show(min_key):
+                min_val = doc.get(min_key)
+                return f"{Emojis.PHP} {format_php(min_val)}" if min_val is not None else "Not Set"
 
-            embed.add_field(name=f"{Emojis.ROBUX} {robux_formatted} • Payout", value=_show("payout_rate", "payout_min"), inline=False)
-            embed.add_field(name=f"{Emojis.ROBUX} {robux_formatted} • Gift",   value=_show("gift_rate",   "gift_min"),   inline=False)
-            embed.add_field(name=f"{Emojis.ROBUX} {robux_formatted} • NCT",    value=_show("nct_rate",    "nct_min"),    inline=False)
-            embed.add_field(name=f"{Emojis.ROBUX} {robux_formatted} • CT",     value=_show("ct_rate",     "ct_min"),     inline=False)
-            embed.set_footer(text="Active = current rate used for conversions  •  Minimum = floor set by /roblox rate")
+            embed.add_field(name=f"{Emojis.ROBUX} {robux_formatted} • Payout", value=_show("payout_min"), inline=False)
+            embed.add_field(name=f"{Emojis.ROBUX} {robux_formatted} • Gift",   value=_show("gift_min"),   inline=False)
+            embed.add_field(name=f"{Emojis.ROBUX} {robux_formatted} • NCT",    value=_show("nct_min"),    inline=False)
+            embed.add_field(name=f"{Emojis.ROBUX} {robux_formatted} • CT",     value=_show("ct_min"),     inline=False)
+            embed.set_footer(text="These are the global minimums — /setrate cannot go below these in any server")
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
@@ -677,8 +670,8 @@ class RobloxCog(commands.Cog):
             await interaction.followup.send("❗ " + "\n".join(errors), ephemeral=True)
             return
 
-        # Save as minimums — these become the floor enforced by /setrate
-        update_fields = {"guild_id": guild_id, "updated_at": datetime.now(PH_TIMEZONE)}
+        # Save globally — these become the floor enforced by /setrate in ALL servers
+        update_fields = {"guild_id": GLOBAL_KEY, "updated_at": datetime.now(PH_TIMEZONE)}
         if payout is not None:
             update_fields["payout_min"] = payout
         if gift is not None:
@@ -688,11 +681,11 @@ class RobloxCog(commands.Cog):
         if ct is not None:
             update_fields["ct_min"] = ct
 
-        db.rates.update_one({"guild_id": guild_id}, {"$set": update_fields}, upsert=True)
+        db.rates.update_one({"guild_id": GLOBAL_KEY}, {"$set": update_fields}, upsert=True)
 
         embed = discord.Embed(
-            title="✅ Minimum Rates Set",
-            description="These values are now the **floor** for this server.\n`/setrate` cannot go below them.",
+            title="✅ Global Minimum Rates Set",
+            description="These values are now the **global floor** for all servers.\n`/setrate` cannot go below them in any server.",
             color=discord.Color.green(),
         )
         robux_formatted = "1,000"
