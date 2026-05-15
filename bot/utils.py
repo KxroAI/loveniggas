@@ -100,24 +100,24 @@ def get_language_instruction(text: str) -> str:
 def get_current_rates(guild_id: str) -> dict:
     """
     Get conversion rates for a guild from DB.
-    Falls back to minimum rates (set via /roblox rate) if no explicit rate is stored.
-    Returns None for any rate that has neither value nor minimum.
+    Priority: server active rate → global minimum (set via /roblox rate) → None.
     """
     empty = {"payout": None, "gift": None, "nct": None, "ct": None}
 
     if not db.is_connected or db.rates is None:
         return empty
 
-    result = db.rates.find_one({"guild_id": str(guild_id)})
+    server_doc = db.rates.find_one({"guild_id": str(guild_id)}) or {}
+    global_doc = db.rates.find_one({"guild_id": "__global__"}) or {}
 
-    if not result:
-        return empty
+    def _resolve(rate_key, min_key):
+        return server_doc.get(rate_key) or global_doc.get(min_key) or None
 
     return {
-        "payout": result.get("payout_rate") or result.get("payout_min"),
-        "gift":   result.get("gift_rate")   or result.get("gift_min"),
-        "nct":    result.get("nct_rate")    or result.get("nct_min"),
-        "ct":     result.get("ct_rate")     or result.get("ct_min"),
+        "payout": _resolve("payout_rate", "payout_min"),
+        "gift":   _resolve("gift_rate",   "gift_min"),
+        "nct":    _resolve("nct_rate",    "nct_min"),
+        "ct":     _resolve("ct_rate",     "ct_min"),
     }
 
 
