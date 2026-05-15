@@ -276,13 +276,13 @@ class ConversionCog(commands.Cog):
 
         guild_id = str(interaction.guild.id)
 
-        # Fetch stored minimums (set via /roblox rate)
-        doc = db.rates.find_one({"guild_id": guild_id}) or {}
+        # Fetch global minimums (set via /roblox rate by bot owner)
+        global_doc = db.rates.find_one({"guild_id": "__global__"}) or {}
         mins = {
-            "payout_rate": doc.get("payout_min"),
-            "gift_rate":   doc.get("gift_min"),
-            "nct_rate":    doc.get("nct_min"),
-            "ct_rate":     doc.get("ct_min"),
+            "payout_rate": global_doc.get("payout_min"),
+            "gift_rate":   global_doc.get("gift_min"),
+            "nct_rate":    global_doc.get("nct_min"),
+            "ct_rate":     global_doc.get("ct_min"),
         }
 
         update_fields: dict = {"guild_id": guild_id, "updated_at": datetime.now(PH_TIMEZONE)}
@@ -504,23 +504,55 @@ class ConversionCog(commands.Cog):
 
             robux_emoji = "<:robux:1438835687741853709>"
             php_emoji = "<:PHP:1438894048222908416>"
+            robux_formatted = "1,000"
 
-            for doc in all_rate_docs:
-                guild_id = int(doc["guild_id"])
-                guild = self.bot.get_guild(guild_id)
-                guild_name = guild.name if guild else f"Unknown Server ({guild_id})"
+            global_doc = next((d for d in all_rate_docs if d.get("guild_id") == "__global__"), {})
+            server_docs = [d for d in all_rate_docs if d.get("guild_id") != "__global__"]
 
-                embed = create_embed(title=f"📊 Rates for: {guild_name}")
-                robux_formatted = "1,000"
+            def _fv(doc, key):
+                v = doc.get(key)
+                return f"{php_emoji} {format_php(v)}" if v is not None else "Not Set"
 
-                def _fv(key):
-                    v = doc.get(key)
-                    return f"{php_emoji} {format_php(v)}" if v is not None else "Not Set"
+            def _fmin(key):
+                v = global_doc.get(key)
+                return f"{php_emoji} {format_php(v)}" if v is not None else "—"
 
-                embed.add_field(name="• Payout Rate", value=f"{robux_emoji} {robux_formatted} → {_fv('payout_rate')}", inline=False)
-                embed.add_field(name="• Gift Rate",   value=f"{robux_emoji} {robux_formatted} → {_fv('gift_rate')}",   inline=False)
-                embed.add_field(name="• NCT Rate",    value=f"{robux_emoji} {robux_formatted} → {_fv('nct_rate')}",    inline=False)
-                embed.add_field(name="• CT Rate",     value=f"{robux_emoji} {robux_formatted} → {_fv('ct_rate')}",     inline=False)
+            # Show global minimums first
+            if global_doc:
+                embed = create_embed(title="🌐 Global Minimum Rates (set by /roblox rate)")
+                embed.add_field(name="• Payout Min", value=f"{robux_emoji} {robux_formatted} → {_fmin('payout_min')}", inline=False)
+                embed.add_field(name="• Gift Min",   value=f"{robux_emoji} {robux_formatted} → {_fmin('gift_min')}",   inline=False)
+                embed.add_field(name="• NCT Min",    value=f"{robux_emoji} {robux_formatted} → {_fmin('nct_min')}",    inline=False)
+                embed.add_field(name="• CT Min",     value=f"{robux_emoji} {robux_formatted} → {_fmin('ct_min')}",     inline=False)
+                updated_at = global_doc.get("updated_at")
+                if updated_at:
+                    embed.timestamp = updated_at
+                    embed.set_footer(text="Last updated")
+                await interaction.followup.send(embed=embed, ephemeral=True)
+
+            # Show per-server rates
+            for doc in server_docs:
+                try:
+                    guild = self.bot.get_guild(int(doc["guild_id"]))
+                    guild_name = guild.name if guild else f"Unknown Server ({doc['guild_id']})"
+                except Exception:
+                    guild_name = f"Unknown Server ({doc.get('guild_id', '?')})"
+
+                embed = create_embed(title=f"📊 {guild_name}")
+
+                for label, rate_key, min_key in [
+                    ("Payout", "payout_rate", "payout_min"),
+                    ("Gift",   "gift_rate",   "gift_min"),
+                    ("NCT",    "nct_rate",    "nct_min"),
+                    ("CT",     "ct_rate",     "ct_min"),
+                ]:
+                    active = _fv(doc, rate_key)
+                    floor  = _fmin(min_key)
+                    embed.add_field(
+                        name=f"• {label} Rate",
+                        value=f"{robux_emoji} {robux_formatted} → {active}\n**Min:** {floor}",
+                        inline=False,
+                    )
 
                 updated_at = doc.get("updated_at")
                 if updated_at:
