@@ -30,7 +30,7 @@ class Emojis:
     PHP = "<:PHP:1438894048222908416>"
     VERIFIED = "<:RobloxVerified:1400310297184702564>"
     UNVERIFIED = "<:Unverified:1446796507931082906>"
-    PREMIUM = "<:RobloxPremium:1499454821642666084>"
+    PREMIUM = "<:RobloxPlus:1499454821642666084>"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ROBLOX GROUP IDS
