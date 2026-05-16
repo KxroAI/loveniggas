@@ -153,7 +153,7 @@ class RobloxCog(commands.Cog):
                 async with session.get(thumb_url) as resp:
                     image_url = (await resp.json())["data"][0]["imageUrl"]
 
-                # Build embed
+                # Build Components V2
                 created_at = isoparse(full_data["created"])
                 created_unix = int(created_at.timestamp())
                 description = full_data.get("description") or "N/A"
@@ -169,22 +169,48 @@ class RobloxCog(commands.Cog):
                     followers = (await r2.json()).get("count", 0)
                     followings = (await r3.json()).get("count", 0)
 
-                embed = create_embed(
-                    title=display_name,
-                    url=f"https://www.roblox.com/users/{user_id}/profile",
+                # Get premium status (requires cookie)
+                premium = False
+                try:
+                    async with session.get(
+                        f"https://premiumfeatures.roblox.com/v1/users/{user_id}/validate-membership",
+                        headers={"Cookie": os.getenv("ROBLOX_COOKIE")},
+                    ) as r4:
+                        premium = await r4.json() if r4.status == 200 else False
+                except Exception:
+                    pass
+
+                status_line = f"**Status:** {status}"
+                if status == "Offline" and last_online != "N/A":
+                    status_line += f" ({last_online})"
+
+                now_unix = int(datetime.now(PH_TIMEZONE).timestamp())
+
+                badge_emojis = ""
+                if verified:
+                    badge_emojis += f" {Emojis.VERIFIED}"
+                if premium:
+                    badge_emojis += f" {Emojis.PREMIUM}"
+
+                container = discord.ui.Container(
+                    discord.ui.Section(
+                        discord.ui.TextDisplay(f"### [{display_name}](https://www.roblox.com/users/{user_id}/profile)"),
+                        discord.ui.TextDisplay(f"## Roblox Information\n**@{username} ({user_id})**{badge_emojis}"),
+                        discord.ui.TextDisplay(f"**Account Created:** <t:{created_unix}:f>"),
+                        accessory=discord.ui.Thumbnail(image_url),
+                    ),
+                    discord.ui.Separator(),
+                    discord.ui.TextDisplay("**## Description**"),
+                    discord.ui.TextDisplay(f"```{description[:1000]}```"),
+                    discord.ui.Separator(),
+                    discord.ui.TextDisplay(f"**Connections:** {friends}/{followers}/{followings}\n{status_line}"),
+                    discord.ui.Separator(visible=False),
+                    discord.ui.TextDisplay(f"-# Neroniel • <t:{now_unix}:f>"),
                 )
 
-                embed.description = (
-                    f"**@{username} {emoji} ({user_id})**\n"
-                    f"**Account Created:** <t:{created_unix}:f>\n\n"
-                    f"```{description[:500]}```\n"
-                    f"**Connections:** {friends}/{followers}/{followings}\n"
-                    f"**Status:** {status}"
-                    + (f" ({last_online})" if status == "Offline" and last_online != "N/A" else "")
-                )
-
-                embed.set_thumbnail(url=image_url)
-                await interaction.followup.send(embed=embed)
+                view = discord.ui.LayoutView()
+                view.add_item(container)
+                await interaction.followup.send(view=view)
 
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
