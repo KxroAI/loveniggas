@@ -23,6 +23,7 @@ class Database:
         self.rates = None
         self.giveaways = None
         self.invites = None
+        self.sticky_pins = None
         self._connected = False
     
     def connect(self) -> bool:
@@ -43,6 +44,7 @@ class Database:
             self.rates = self.db.rates
             self.giveaways = self.db.giveaways
             self.invites = self.db.invites
+            self.sticky_pins = self.db.sticky_pins
             
             # Create indexes
             self._create_indexes()
@@ -71,6 +73,10 @@ class Database:
         self.invites.create_index(
             [("guild_id", ASCENDING), ("user_id", ASCENDING)], unique=True
         )
+
+        # Indexes for sticky pins
+        self.sticky_pins.create_index([("guild_id", ASCENDING)])
+        self.sticky_pins.create_index([("pin_id", ASCENDING)], unique=True)
     
     @property
     def is_connected(self) -> bool:
