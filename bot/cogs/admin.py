@@ -166,6 +166,7 @@ class StickyPin:
         self.channels: list[int] = []
         self.buttons: list[dict] = []
         self.delay: int = 3
+        self.paused: bool = False
 
     def build_view(self) -> Optional[discord.ui.View]:
         if not self.buttons:
@@ -197,10 +198,14 @@ _last_msg: dict[str, int] = {}
 _pending: dict[int, asyncio.Task] = {}
 # f"{channel_id}:{pin_id}" -> monotonic timestamp of last post
 _last_post_ts: dict[str, float] = {}
+# channel_ids where a sticky is currently being sent (pre-send race guard)
+_posting: set[int] = set()
+# all message IDs ever sent as sticky pins — never removed mid-cycle
+_sticky_ids: set[int] = set()
 
 
 def _get_pins_for_channel(channel_id: int, guild_id: int) -> list[StickyPin]:
-    return [p for p in _pins.get(guild_id, []) if channel_id in p.channels]
+    return [p for p in _pins.get(guild_id, []) if channel_id in p.channels and not p.paused]
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -219,6 +224,7 @@ def _pin_to_doc(pin: StickyPin) -> dict:
         "channels": pin.channels,
         "buttons": pin.buttons,
         "delay": pin.delay,
+        "paused": pin.paused,
     }
 
 
@@ -233,6 +239,7 @@ def _doc_to_pin(doc: dict) -> StickyPin:
     pin.channels = doc.get("channels", [])
     pin.buttons = doc.get("buttons", [])
     pin.delay = doc.get("delay", 3)
+    pin.paused = doc.get("paused", False)
     return pin
 
 
@@ -341,6 +348,7 @@ def _main_menu_embed() -> discord.Embed:
     )
     e.add_field(name="✨ Create a new Pin", value="Set up a new pin message", inline=False)
     e.add_field(name="✏️ Edit a Pin", value="Modify an existing pin message", inline=False)
+    e.add_field(name="⏸️ Pause / Resume a Pin", value="Temporarily stop or restart a pin", inline=False)
     e.add_field(name="🗑️ Delete Pins", value="Remove pin messages from channels", inline=False)
     e.add_field(name="📋 List Pins", value="View all pin messages in server", inline=False)
     e.set_footer(text="What would you like to do?")
@@ -356,6 +364,7 @@ class MainMenuView(ui.View):
             options=[
                 discord.SelectOption(label="Create a new Pin", description="Set up a new pin message", value="create", emoji="✨"),
                 discord.SelectOption(label="Edit a Pin", description="Modify an existing pin message", value="edit", emoji="✏️"),
+                discord.SelectOption(label="Pause / Resume a Pin", description="Temporarily stop or restart a pin", value="pause", emoji="⏸️"),
                 discord.SelectOption(label="Delete Pins", description="Remove pin messages from channels", value="delete", emoji="🗑️"),
                 discord.SelectOption(label="List Pins", description="View all pin messages in server", value="list", emoji="📋"),
             ],
@@ -382,6 +391,20 @@ class MainMenuView(ui.View):
             await interaction.response.edit_message(
                 embed=discord.Embed(title="✏️ Edit a Pin", description="Select which pin you want to edit.", color=0x7289DA),
                 view=EditSelectView(pins, self.cog),
+            )
+
+        elif choice == "pause":
+            pins = _pins.get(guild_id, [])
+            if not pins:
+                await interaction.response.send_message("❌ No sticky pins found.", ephemeral=True)
+                return
+            await interaction.response.edit_message(
+                embed=discord.Embed(
+                    title="⏸️ Pause / Resume a Pin",
+                    description="Select a pin to toggle its paused state.\nPaused pins will not repost until resumed.",
+                    color=0xFEE75C,
+                ),
+                view=PauseSelectView(pins, self.cog),
             )
 
         elif choice == "delete":
@@ -904,6 +927,143 @@ class DeleteConfirmView(ui.View):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# STICKY PIN — PAUSE / RESUME
+# ══════════════════════════════════════════════════════════════════════════════
+
+class PauseSelectView(ui.View):
+    def __init__(self, pins: list[StickyPin], cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self._pins = pins
+        select = ui.Select(
+            placeholder="Select a pin to pause or resume...",
+            options=[
+                discord.SelectOption(
+                    label=f"[{_short_id(p.pin_id)}] {p.pin_type.title()}",
+                    description=f"{'⏸ PAUSED' if p.paused else '▶ Active'} | {len(p.channels)} channel(s) | {p.delay}s delay",
+                    value=p.pin_id,
+                    emoji="⏸️" if p.paused else "▶️",
+                )
+                for p in pins[:25]
+            ],
+            min_values=1,
+            max_values=1,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+        back_btn = ui.Button(label="↩️ Back to Menu", style=discord.ButtonStyle.secondary)
+        back_btn.callback = self._back
+        self.add_item(back_btn)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        pin_id = interaction.data["values"][0]
+        guild_id = interaction.guild.id
+        pin = next((p for p in _pins.get(guild_id, []) if p.pin_id == pin_id), None)
+        if not pin:
+            await interaction.response.send_message("❌ Pin not found.", ephemeral=True)
+            return
+
+        if pin.paused:
+            embed = discord.Embed(
+                title="⏸️ Pin is Currently Paused",
+                description=(
+                    f"**Pin:** `{_short_id(pin_id)}`\n"
+                    f"**Type:** {'📝 Text' if pin.pin_type == 'text' else '🎨 Embed'}\n"
+                    f"**Channels:** {_fmt_channels(pin.channels)}\n\n"
+                    "This pin is paused and not reposting.\nPress **▶️ Resume** to make it active again."
+                ),
+                color=0xFEE75C,
+            )
+        else:
+            embed = discord.Embed(
+                title="▶️ Pin is Currently Active",
+                description=(
+                    f"**Pin:** `{_short_id(pin_id)}`\n"
+                    f"**Type:** {'📝 Text' if pin.pin_type == 'text' else '🎨 Embed'}\n"
+                    f"**Channels:** {_fmt_channels(pin.channels)}\n\n"
+                    "This pin is active and reposting normally.\nPress **⏸️ Pause** to stop it temporarily."
+                ),
+                color=0x57F287,
+            )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=PauseConfirmView(pin_id, guild_id, self.cog),
+        )
+
+    async def _back(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=_main_menu_embed(), view=MainMenuView(self.cog))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+class PauseConfirmView(ui.View):
+    def __init__(self, pin_id: str, guild_id: int, cog):
+        super().__init__(timeout=120)
+        self.pin_id = pin_id
+        self.guild_id = guild_id
+        self.cog = cog
+
+    @ui.button(label="⏸️ Pause", style=discord.ButtonStyle.danger)
+    async def pause_btn(self, interaction: discord.Interaction, button: ui.Button):
+        await self._apply(interaction, paused=True)
+
+    @ui.button(label="▶️ Resume", style=discord.ButtonStyle.success)
+    async def resume_btn(self, interaction: discord.Interaction, button: ui.Button):
+        await self._apply(interaction, paused=False)
+
+    @ui.button(label="↩️ Back", style=discord.ButtonStyle.secondary)
+    async def back_btn(self, interaction: discord.Interaction, _: ui.Button):
+        pins = _pins.get(self.guild_id, [])
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title="⏸️ Pause / Resume a Pin",
+                description="Select a pin to pause or resume it.",
+                color=0xFEE75C,
+            ),
+            view=PauseSelectView(pins, self.cog),
+        )
+
+    async def _apply(self, interaction: discord.Interaction, paused: bool):
+        pin = next((p for p in _pins.get(self.guild_id, []) if p.pin_id == self.pin_id), None)
+        if not pin:
+            await interaction.response.send_message("❌ Pin not found.", ephemeral=True)
+            return
+
+        pin.paused = paused
+        _db_save_pin(pin)
+
+        if paused:
+            for cid in pin.channels:
+                task = _pending.get(cid)
+                if task and not task.done():
+                    task.cancel()
+            result_embed = discord.Embed(
+                title="⏸️ Pin Paused",
+                description=f"Sticky pin `{_short_id(self.pin_id)}` is now **paused** and will not repost until resumed.",
+                color=0xFEE75C,
+            )
+        else:
+            result_embed = discord.Embed(
+                title="▶️ Pin Resumed",
+                description=f"Sticky pin `{_short_id(self.pin_id)}` is now **active** and will repost on new messages.",
+                color=0x57F287,
+            )
+
+        pins = _pins.get(self.guild_id, [])
+        await interaction.response.edit_message(
+            embed=result_embed,
+            view=PauseSelectView(pins, self.cog),
+        )
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # STICKY PIN — LIST EMBED
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -913,12 +1073,13 @@ def _list_embed(pins: list[StickyPin]) -> discord.Embed:
         channels_str = ", ".join(f"<#{cid}>" for cid in pin.channels[:5])
         if len(pin.channels) > 5:
             channels_str += f" (+{len(pin.channels) - 5} more)"
+        status = "⏸ Paused" if pin.paused else "▶ Active"
         e.add_field(
-            name=f"[{_short_id(pin.pin_id)}] {'📝 Text' if pin.pin_type == 'text' else '🎨 Embed'}",
+            name=f"[{_short_id(pin.pin_id)}] {'📝 Text' if pin.pin_type == 'text' else '🎨 Embed'} — {status}",
             value=f"**Channels:** {channels_str or '*(none)*'}\n**Delay:** {pin.delay}s | **Buttons:** {len(pin.buttons)}",
             inline=False,
         )
-    e.set_footer(text="Use /stickypin → Delete Pins to remove a pin")
+    e.set_footer(text="Use /stickypin → Pause/Resume to toggle a pin")
     return e
 
 
@@ -1110,9 +1271,15 @@ class AdminCog(commands.Cog):
     async def on_message(self, message: discord.Message):
         if not message.guild:
             return
-        # Skip our own messages entirely to prevent sticky repost loops
-        if message.author.id == self.bot.user.id:
-            return
+        # Skip our own sticky pin messages — three-layer guard:
+        # 1. _posting: channel is actively sending a sticky right now (pre-send race guard)
+        # 2. _sticky_ids: persistent set of every message ID we sent as a sticky
+        # 3. _last_msg: current known sticky IDs per channel+pin key
+        if self.bot.user and message.author.id == self.bot.user.id:
+            if (message.channel.id in _posting
+                    or message.id in _sticky_ids
+                    or message.id in _last_msg.values()):
+                return
         active_pins = _get_pins_for_channel(message.channel.id, message.guild.id)
         if not active_pins:
             return
@@ -1149,14 +1316,18 @@ class AdminCog(commands.Cog):
                 pass
             _last_msg.pop(key, None)
         try:
+            _posting.add(channel.id)
             view = pin.build_view()
             sent = await channel.send(embed=pin.build_embed(), view=view) if pin.pin_type == "embed" else await channel.send(content=pin.content, view=view)
+            _sticky_ids.add(sent.id)
             _last_msg[key] = sent.id
             _db_update_last_msg(pin.pin_id, channel.id, sent.id)
         except discord.Forbidden:
             print(f"[StickyPin] No send permission in #{channel.name}")
         except discord.HTTPException as e:
             print(f"[StickyPin] HTTP error: {e}")
+        finally:
+            _posting.discard(channel.id)
 
 
 async def setup(bot: commands.Bot):
