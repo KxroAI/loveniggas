@@ -203,6 +203,84 @@ def _get_pins_for_channel(channel_id: int, guild_id: int) -> list[StickyPin]:
     return [p for p in _pins.get(guild_id, []) if channel_id in p.channels]
 
 
+# ── DB helpers ────────────────────────────────────────────────────────────────
+
+def _pin_to_doc(pin: StickyPin) -> dict:
+    return {
+        "pin_id": pin.pin_id,
+        "guild_id": pin.guild_id,
+        "creator_id": pin.creator_id,
+        "pin_type": pin.pin_type,
+        "content": pin.content,
+        "embed_title": pin.embed_title,
+        "embed_description": pin.embed_description,
+        "embed_footer": pin.embed_footer,
+        "embed_color": pin.embed_color,
+        "channels": pin.channels,
+        "buttons": pin.buttons,
+        "delay": pin.delay,
+    }
+
+
+def _doc_to_pin(doc: dict) -> StickyPin:
+    pin = StickyPin(doc["pin_id"], doc["guild_id"], doc["creator_id"])
+    pin.pin_type = doc.get("pin_type", "text")
+    pin.content = doc.get("content", "")
+    pin.embed_title = doc.get("embed_title", "")
+    pin.embed_description = doc.get("embed_description", "")
+    pin.embed_footer = doc.get("embed_footer", "")
+    pin.embed_color = doc.get("embed_color", 0x7289DA)
+    pin.channels = doc.get("channels", [])
+    pin.buttons = doc.get("buttons", [])
+    pin.delay = doc.get("delay", 3)
+    return pin
+
+
+def _db_save_pin(pin: StickyPin) -> None:
+    if not db.is_connected or db.sticky_pins is None:
+        return
+    db.sticky_pins.update_one(
+        {"pin_id": pin.pin_id},
+        {"$set": _pin_to_doc(pin)},
+        upsert=True,
+    )
+
+
+def _db_delete_pin(pin_id: str) -> None:
+    if not db.is_connected or db.sticky_pins is None:
+        return
+    db.sticky_pins.delete_one({"pin_id": pin_id})
+
+
+def _db_update_last_msg(pin_id: str, channel_id: int, msg_id: int) -> None:
+    if not db.is_connected or db.sticky_pins is None:
+        return
+    db.sticky_pins.update_one(
+        {"pin_id": pin_id},
+        {"$set": {f"last_messages.{channel_id}": msg_id}},
+    )
+
+
+def _db_load_pins() -> None:
+    if not db.is_connected or db.sticky_pins is None:
+        return
+    count = 0
+    for doc in db.sticky_pins.find():
+        try:
+            pin = _doc_to_pin(doc)
+            guild_pins = _pins.setdefault(pin.guild_id, [])
+            if not any(p.pin_id == pin.pin_id for p in guild_pins):
+                guild_pins.append(pin)
+            for ch_id_str, msg_id in doc.get("last_messages", {}).items():
+                key = f"{ch_id_str}:{pin.pin_id}"
+                _last_msg[key] = msg_id
+            count += 1
+        except Exception as e:
+            print(f"[StickyPin] Failed to restore pin {doc.get('pin_id')}: {e}")
+    if count:
+        print(f"[StickyPin] Restored {count} sticky pin(s) from database")
+
+
 def _short_id(pin_id: str) -> str:
     return pin_id[:8]
 
@@ -680,6 +758,8 @@ class Step5PreviewView(ui.View):
             color=0x57F287,
         )
         saved_embed.set_footer(text=f"Pin ID: {_short_id(pin.pin_id)} • /stickypin → List Pins to manage")
+        _db_save_pin(pin)
+
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(embed=saved_embed, view=self)
@@ -803,6 +883,7 @@ class DeleteConfirmView(ui.View):
                 if task and not task.done():
                     task.cancel()
             _pins[self.guild_id] = [p for p in pins if p.pin_id != self.pin_id]
+            _db_delete_pin(self.pin_id)
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(
@@ -1071,6 +1152,7 @@ class AdminCog(commands.Cog):
             view = pin.build_view()
             sent = await channel.send(embed=pin.build_embed(), view=view) if pin.pin_type == "embed" else await channel.send(content=pin.content, view=view)
             _last_msg[key] = sent.id
+            _db_update_last_msg(pin.pin_id, channel.id, sent.id)
         except discord.Forbidden:
             print(f"[StickyPin] No send permission in #{channel.name}")
         except discord.HTTPException as e:
@@ -1078,4 +1160,5 @@ class AdminCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
+    _db_load_pins()
     await bot.add_cog(AdminCog(bot))
