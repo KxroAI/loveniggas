@@ -1,1787 +1,1335 @@
 """
-Roblox Commands Cog
-Handles all Roblox-related commands (profile, group, stocks, etc.)
+Admin Commands Cog
+Owner and administrator only commands, plus sticky pin management.
 """
 
-import os
-import re
-import json
-import base64
-import aiohttp
-import discord
-from discord import app_commands
-from discord.ext import commands
-from datetime import datetime, timedelta
-from dateutil.parser import isoparse
 import asyncio
+import time
+import uuid
+import discord
+from discord import app_commands, ui
+from discord.ext import commands
+from datetime import datetime
+from typing import Optional
 
-from ..config import (
-    PH_TIMEZONE, BOT_OWNER_ID, ROBLOX_GROUPS, 
-    ALL_GROUP_IDS, Emojis, ASSET_TYPE_MAP,
-)
-from ..utils import create_embed, clean_text_for_match, format_number
+from ..config import PH_TIMEZONE, BOT_OWNER_ID
+from ..database import db
+from ..utils import create_embed
 
 
-class RobloxCog(commands.Cog):
-    """Roblox-related commands."""
+# ══════════════════════════════════════════════════════════════════════════════
+# ANNOUNCEMENT MODAL
+# ══════════════════════════════════════════════════════════════════════════════
 
+class AnnouncementModal(ui.Modal, title="Create Announcement"):
+    """Modal for creating announcements."""
+    
+    def __init__(self, bot: commands.Bot):
+        super().__init__()
+        self.bot = bot
+        self.collected_data = {}
+        
+        self.title_input = ui.TextInput(
+            label="Title (optional)",
+            default="ANNOUNCEMENT",
+            required=False,
+            max_length=256,
+        )
+        self.message_input = ui.TextInput(
+            label="Message (required)",
+            placeholder="Your announcement message...",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=4000,
+        )
+        self.codeblock_input = ui.TextInput(
+            label="Use Code Block? (Yes/No)",
+            default="No",
+            required=True,
+            placeholder="Type 'Yes' or 'No'",
+        )
+        
+        self.add_item(self.title_input)
+        self.add_item(self.message_input)
+        self.add_item(self.codeblock_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        title = self.title_input.value.strip() or "ANNOUNCEMENT"
+        message = self.message_input.value.strip()
+        use_codeblock = self.codeblock_input.value.strip().lower() in ("yes", "y", "true", "1")
+        
+        description = f"```\n{message}\n```" if use_codeblock else message
+        embed = create_embed(title=title, description=description)
+        
+        view = AnnouncementConfirmView(
+            author=interaction.user,
+            title=title,
+            message=message,
+            use_codeblock=use_codeblock,
+        )
+        
+        await interaction.response.send_message(
+            "📋 **Preview:**",
+            embed=embed,
+            view=view,
+            ephemeral=True,
+        )
+
+
+class AnnouncementConfirmView(ui.View):
+    """Confirmation view for announcements."""
+    
+    def __init__(self, author: discord.User, title: str, message: str, use_codeblock: bool):
+        super().__init__(timeout=180)
+        self.author = author
+        self.title = title
+        self.message = message
+        self.use_codeblock = use_codeblock
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user == self.author
+    
+    @ui.button(label="Send", style=discord.ButtonStyle.green)
+    async def send(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_message(
+            "Please select a channel:",
+            view=ChannelSelectView(
+                author=self.author,
+                title=self.title,
+                message=self.message,
+                use_codeblock=self.use_codeblock,
+            ),
+            ephemeral=True,
+        )
+    
+    @ui.button(label="Cancel", style=discord.ButtonStyle.red)
+    async def cancel(self, interaction: discord.Interaction, button: ui.Button):
+        embed = create_embed(title="❌ Announcement cancelled.")
+        await interaction.response.edit_message(embed=embed, view=None)
+
+
+class ChannelSelectView(ui.View):
+    """Channel selection for announcements."""
+    
+    def __init__(self, author: discord.User, title: str, message: str, use_codeblock: bool):
+        super().__init__(timeout=180)
+        self.author = author
+        self.title = title
+        self.message = message
+        self.use_codeblock = use_codeblock
+    
+    @ui.select(
+        cls=ui.ChannelSelect,
+        channel_types=[discord.ChannelType.text],
+        placeholder="Select a channel...",
+    )
+    async def select_channel(self, interaction: discord.Interaction, select: ui.ChannelSelect):
+        if interaction.user != self.author:
+            await interaction.response.send_message("❌ Not your menu.", ephemeral=True)
+            return
+        
+        try:
+            channel = await interaction.guild.fetch_channel(select.values[0].id)
+        except Exception:
+            await interaction.response.send_message("❌ Channel not accessible.", ephemeral=True)
+            return
+        
+        description = f"```\n{self.message}\n```" if self.use_codeblock else self.message
+        embed = create_embed(title=self.title, description=description)
+        
+        try:
+            await channel.send(embed=embed)
+            await interaction.response.edit_message(
+                content="✅ Announcement sent!",
+                embed=None,
+                view=None,
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ No permission to send there.", ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STICKY PIN — DATA MODEL
+# ══════════════════════════════════════════════════════════════════════════════
+
+class StickyPin:
+    def __init__(self, pin_id: str, guild_id: int, creator_id: int):
+        self.pin_id: str = pin_id
+        self.guild_id: int = guild_id
+        self.creator_id: int = creator_id
+        self.pin_type: str = "text"
+        self.content: str = ""
+        self.embed_title: str = ""
+        self.embed_description: str = ""
+        self.embed_footer: str = ""
+        self.embed_color: int = 0x7289DA
+        self.channels: list[int] = []
+        self.buttons: list[dict] = []
+        self.delay: int = 3
+        self.paused: bool = False
+
+    def build_view(self) -> Optional[discord.ui.View]:
+        if not self.buttons:
+            return None
+        v = discord.ui.View(timeout=None)
+        for btn in self.buttons:
+            v.add_item(discord.ui.Button(
+                style=discord.ButtonStyle.link,
+                label=btn["label"],
+                url=btn["url"],
+            ))
+        return v
+
+    def build_embed(self) -> discord.Embed:
+        e = discord.Embed(
+            title=self.embed_title or None,
+            description=self.embed_description or None,
+            color=self.embed_color,
+        )
+        e.set_footer(text=self.embed_footer.strip() if self.embed_footer else "📌 Sticky Pin")
+        return e
+
+
+# guild_id -> list[StickyPin]
+_pins: dict[int, list[StickyPin]] = {}
+# f"{channel_id}:{pin_id}" -> last sticky message id
+_last_msg: dict[str, int] = {}
+# channel_id -> pending asyncio Task
+_pending: dict[int, asyncio.Task] = {}
+# f"{channel_id}:{pin_id}" -> monotonic timestamp of last post
+_last_post_ts: dict[str, float] = {}
+# channel_ids where a sticky is currently being sent (pre-send race guard)
+_posting: set[int] = set()
+# all message IDs ever sent as sticky pins — never removed mid-cycle
+_sticky_ids: set[int] = set()
+
+
+def _get_pins_for_channel(channel_id: int, guild_id: int) -> list[StickyPin]:
+    return [p for p in _pins.get(guild_id, []) if channel_id in p.channels and not p.paused]
+
+
+# ── DB helpers ────────────────────────────────────────────────────────────────
+
+def _pin_to_doc(pin: StickyPin) -> dict:
+    return {
+        "pin_id": pin.pin_id,
+        "guild_id": pin.guild_id,
+        "creator_id": pin.creator_id,
+        "pin_type": pin.pin_type,
+        "content": pin.content,
+        "embed_title": pin.embed_title,
+        "embed_description": pin.embed_description,
+        "embed_footer": pin.embed_footer,
+        "embed_color": pin.embed_color,
+        "channels": pin.channels,
+        "buttons": pin.buttons,
+        "delay": pin.delay,
+        "paused": pin.paused,
+    }
+
+
+def _doc_to_pin(doc: dict) -> StickyPin:
+    pin = StickyPin(doc["pin_id"], doc["guild_id"], doc["creator_id"])
+    pin.pin_type = doc.get("pin_type", "text")
+    pin.content = doc.get("content", "")
+    pin.embed_title = doc.get("embed_title", "")
+    pin.embed_description = doc.get("embed_description", "")
+    pin.embed_footer = doc.get("embed_footer", "")
+    pin.embed_color = doc.get("embed_color", 0x7289DA)
+    pin.channels = doc.get("channels", [])
+    pin.buttons = doc.get("buttons", [])
+    pin.delay = doc.get("delay", 3)
+    pin.paused = doc.get("paused", False)
+    return pin
+
+
+def _db_save_pin(pin: StickyPin) -> None:
+    if not db.is_connected or db.sticky_pins is None:
+        return
+    db.sticky_pins.update_one(
+        {"pin_id": pin.pin_id},
+        {"$set": _pin_to_doc(pin)},
+        upsert=True,
+    )
+
+
+def _db_delete_pin(pin_id: str) -> None:
+    if not db.is_connected or db.sticky_pins is None:
+        return
+    db.sticky_pins.delete_one({"pin_id": pin_id})
+
+
+def _db_update_last_msg(pin_id: str, channel_id: int, msg_id: int) -> None:
+    if not db.is_connected or db.sticky_pins is None:
+        return
+    db.sticky_pins.update_one(
+        {"pin_id": pin_id},
+        {"$set": {f"last_messages.{channel_id}": msg_id}},
+    )
+
+
+def _db_load_pins() -> None:
+    if not db.is_connected or db.sticky_pins is None:
+        return
+    count = 0
+    for doc in db.sticky_pins.find():
+        try:
+            pin = _doc_to_pin(doc)
+            guild_pins = _pins.setdefault(pin.guild_id, [])
+            if not any(p.pin_id == pin.pin_id for p in guild_pins):
+                guild_pins.append(pin)
+            for ch_id_str, msg_id in doc.get("last_messages", {}).items():
+                key = f"{ch_id_str}:{pin.pin_id}"
+                _last_msg[key] = msg_id
+            count += 1
+        except Exception as e:
+            print(f"[StickyPin] Failed to restore pin {doc.get('pin_id')}: {e}")
+    if count:
+        print(f"[StickyPin] Restored {count} sticky pin(s) from database")
+
+
+def _short_id(pin_id: str) -> str:
+    return pin_id[:8]
+
+
+def _fmt_channels(channel_ids: list[int]) -> str:
+    return ", ".join(f"<#{cid}>" for cid in channel_ids) if channel_ids else "*(none)*"
+
+
+def _parse_color(raw: str) -> int:
+    try:
+        return int(raw.strip().lstrip("#"), 16)
+    except ValueError:
+        return 0x7289DA
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STICKY PIN — WIZARD STATE
+# ══════════════════════════════════════════════════════════════════════════════
+
+class WizardState:
+    def __init__(self, guild_id: int, creator_id: int, edit_pin: StickyPin = None):
+        self.guild_id = guild_id
+        self.creator_id = creator_id
+        self._cog = None
+        if edit_pin:
+            self.pin_id = edit_pin.pin_id
+            self.pin_type = edit_pin.pin_type
+            self.content = edit_pin.content
+            self.embed_title = edit_pin.embed_title
+            self.embed_description = edit_pin.embed_description
+            self.embed_footer = edit_pin.embed_footer
+            self.embed_color = edit_pin.embed_color
+            self.channels = list(edit_pin.channels)
+            self.buttons = list(edit_pin.buttons)
+            self.delay = edit_pin.delay
+        else:
+            self.pin_id = str(uuid.uuid4())
+            self.pin_type = "text"
+            self.content = ""
+            self.embed_title = ""
+            self.embed_description = ""
+            self.embed_footer = ""
+            self.embed_color = 0x7289DA
+            self.channels = []
+            self.buttons = []
+            self.delay = 3
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STICKY PIN — MAIN MENU
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _main_menu_embed() -> discord.Embed:
+    e = discord.Embed(
+        title="📌 Sticky Pins",
+        description="Keep a message pinned at the bottom of any channel.\nChoose an action below to get started.",
+        color=0x7289DA,
+    )
+    e.add_field(name="✨ Create a new Pin", value="Set up a new pin message", inline=False)
+    e.add_field(name="✏️ Edit a Pin", value="Modify an existing pin message", inline=False)
+    e.add_field(name="⏸️ Pause / Resume a Pin", value="Temporarily stop or restart a pin", inline=False)
+    e.add_field(name="🗑️ Delete Pins", value="Remove pin messages from channels", inline=False)
+    e.add_field(name="📋 List Pins", value="View all pin messages in server", inline=False)
+    e.set_footer(text="What would you like to do?")
+    return e
+
+
+class MainMenuView(ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+        select = ui.Select(
+            placeholder="What would you like to do?",
+            options=[
+                discord.SelectOption(label="Create a new Pin", description="Set up a new pin message", value="create", emoji="✨"),
+                discord.SelectOption(label="Edit a Pin", description="Modify an existing pin message", value="edit", emoji="✏️"),
+                discord.SelectOption(label="Pause / Resume a Pin", description="Temporarily stop or restart a pin", value="pause", emoji="⏸️"),
+                discord.SelectOption(label="Delete Pins", description="Remove pin messages from channels", value="delete", emoji="🗑️"),
+                discord.SelectOption(label="List Pins", description="View all pin messages in server", value="list", emoji="📋"),
+            ],
+            min_values=1,
+            max_values=1,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        choice = interaction.data["values"][0]
+        guild_id = interaction.guild.id
+
+        if choice == "create":
+            state = WizardState(guild_id, interaction.user.id)
+            state._cog = self.cog
+            await interaction.response.edit_message(embed=_step1_embed(), view=Step1TypeView(state))
+
+        elif choice == "edit":
+            pins = _pins.get(guild_id, [])
+            if not pins:
+                await interaction.response.send_message("❌ No sticky pins found. Create one first!", ephemeral=True)
+                return
+            await interaction.response.edit_message(
+                embed=discord.Embed(title="✏️ Edit a Pin", description="Select which pin you want to edit.", color=0x7289DA),
+                view=EditSelectView(pins, self.cog),
+            )
+
+        elif choice == "pause":
+            pins = _pins.get(guild_id, [])
+            if not pins:
+                await interaction.response.send_message("❌ No sticky pins found.", ephemeral=True)
+                return
+            await interaction.response.edit_message(
+                embed=discord.Embed(
+                    title="⏸️ Pause / Resume a Pin",
+                    description="Select a pin to toggle its paused state.\nPaused pins will not repost until resumed.",
+                    color=0xFEE75C,
+                ),
+                view=PauseSelectView(pins, self.cog),
+            )
+
+        elif choice == "delete":
+            pins = _pins.get(guild_id, [])
+            if not pins:
+                await interaction.response.send_message("❌ No sticky pins found.", ephemeral=True)
+                return
+            await interaction.response.edit_message(
+                embed=discord.Embed(title="🗑️ Delete a Pin", description="Select which pin you want to delete.", color=0xED4245),
+                view=DeleteSelectView(pins, self.cog),
+            )
+
+        elif choice == "list":
+            pins = _pins.get(guild_id, [])
+            if not pins:
+                await interaction.response.edit_message(
+                    embed=discord.Embed(title="📋 No Sticky Pins", description="This server has no sticky pins yet.\nSelect **✨ Create a new Pin** to make one!", color=0x7289DA),
+                    view=BackToMenuView(self.cog),
+                )
+                return
+            await interaction.response.edit_message(embed=_list_embed(pins), view=BackToMenuView(self.cog))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+class BackToMenuView(ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    @ui.button(label="↩️ Back to Menu", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, _: ui.Button):
+        await interaction.response.edit_message(embed=_main_menu_embed(), view=MainMenuView(self.cog))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STICKY PIN — STEP 1: TYPE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _step1_embed() -> discord.Embed:
+    e = discord.Embed(
+        title="📌 Create Sticky Pin — Step 1 of 5",
+        description=(
+            "**Choose Message Type**\n\n"
+            "📝 **Text** — A plain text message that stays pinned.\n"
+            "🎨 **Embed** — A rich embed with title, description, footer, and color.\n\n"
+            "*Both types support optional interactive URL buttons.*"
+        ),
+        color=0x7289DA,
+    )
+    e.set_footer(text="Step 1 / 5 • Type Selection")
+    return e
+
+
+class TextContentModal(ui.Modal, title="📝 Text Sticky Content"):
+    content = ui.TextInput(label="Message Content", placeholder="Enter the text that will stay pinned...", style=discord.TextStyle.paragraph, max_length=2000, required=True)
+
+    def __init__(self, state: WizardState):
+        super().__init__()
+        self.state = state
+        if state.pin_type == "text" and state.content:
+            self.content.default = state.content
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.state.pin_type = "text"
+        self.state.content = self.content.value.strip()
+        await interaction.response.edit_message(embed=_step2_embed(), view=Step2ChannelView(self.state))
+
+
+class EmbedContentModal(ui.Modal, title="🎨 Create Embed"):
+    title_input = ui.TextInput(label="Title", placeholder="Enter an embed title...", required=True, max_length=256)
+    description = ui.TextInput(label="Description", placeholder="Enter the embed body text...", style=discord.TextStyle.paragraph, max_length=4000, required=True)
+    footer = ui.TextInput(label="Footer", placeholder="Footer text (optional)", required=False, max_length=2048)
+    color = ui.TextInput(label="Color (hex code, e.g. #FF0000)", placeholder="#7289DA", default="#7289DA", required=False, max_length=9)
+
+    def __init__(self, state: WizardState):
+        super().__init__()
+        self.state = state
+        if state.pin_type == "embed":
+            if state.embed_title:
+                self.title_input.default = state.embed_title
+            if state.embed_description:
+                self.description.default = state.embed_description
+            if state.embed_footer:
+                self.footer.default = state.embed_footer
+            self.color.default = f"#{state.embed_color:06X}"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.state.pin_type = "embed"
+        self.state.embed_title = self.title_input.value.strip()
+        self.state.embed_description = self.description.value.strip()
+        self.state.embed_footer = self.footer.value.strip()
+        self.state.embed_color = _parse_color(self.color.value)
+        await interaction.response.edit_message(embed=_step2_embed(), view=Step2ChannelView(self.state))
+
+
+class Step1TypeView(ui.View):
+    def __init__(self, state: WizardState, from_edit: bool = False):
+        super().__init__(timeout=300)
+        self.state = state
+        select = ui.Select(
+            placeholder="Select message type",
+            options=[
+                discord.SelectOption(label="Text", description="A plain text message that stays pinned", value="text", emoji="📝"),
+                discord.SelectOption(label="Embed", description="Rich embed with title, description, footer & color", value="embed", emoji="🎨"),
+            ],
+            min_values=1, max_values=1, row=0,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+        back_btn = ui.Button(label="↩️ Back to Menu", style=discord.ButtonStyle.secondary, row=1)
+        back_btn.callback = self._back
+        self.add_item(back_btn)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        if interaction.data["values"][0] == "text":
+            await interaction.response.send_modal(TextContentModal(self.state))
+        else:
+            await interaction.response.send_modal(EmbedContentModal(self.state))
+
+    async def _back(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=_main_menu_embed(), view=MainMenuView(getattr(self.state, "_cog", None)))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STICKY PIN — STEP 2: CHANNELS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _step2_embed() -> discord.Embed:
+    e = discord.Embed(
+        title="📌 Create Sticky Pin — Step 2 of 5",
+        description="**Select Channels**\nChoose which channels this sticky pin will appear in.\nYou can select multiple channels at once.\n\n*The sticky will always stay at the bottom of each selected channel.*",
+        color=0x7289DA,
+    )
+    e.set_footer(text="Step 2 / 5 • Channel Selection")
+    return e
+
+
+class Step2ChannelView(ui.View):
+    def __init__(self, state: WizardState):
+        super().__init__(timeout=300)
+        self.state = state
+
+    @ui.select(cls=ui.ChannelSelect, placeholder="Select one or more channels...", min_values=1, max_values=25, channel_types=[discord.ChannelType.text, discord.ChannelType.news])
+    async def channel_select(self, interaction: discord.Interaction, select: ui.ChannelSelect):
+        self.state.channels = [ch.id for ch in select.values]
+        await interaction.response.edit_message(embed=_step3_embed(self.state), view=Step3ButtonsView(self.state))
+
+    @ui.button(label="↩️ Back", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, _: ui.Button):
+        await interaction.response.edit_message(embed=_step1_embed(), view=Step1TypeView(self.state))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STICKY PIN — STEP 3: BUTTONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _step3_embed(state: WizardState) -> discord.Embed:
+    btn_list = "\n".join(f"• **{b['label']}** → {b['url']}" for b in state.buttons) if state.buttons else "*No buttons added yet.*"
+    e = discord.Embed(
+        title="📌 Create Sticky Pin — Step 3 of 5",
+        description=f"**Add Interactive Buttons** *(optional)*\nAdd up to 5 clickable URL buttons. Skip if not needed.\n\n**Channels:** {_fmt_channels(state.channels)}\n\n**Buttons Added:**\n{btn_list}",
+        color=0x7289DA,
+    )
+    e.set_footer(text="Step 3 / 5 • Buttons (optional)")
+    return e
+
+
+class AddButtonModal(ui.Modal, title="➕ Add a Button"):
+    label = ui.TextInput(label="Button Label", placeholder="e.g. Join Server", max_length=80, required=True)
+    url = ui.TextInput(label="URL", placeholder="https://example.com", max_length=512, required=True)
+
+    def __init__(self, state: WizardState):
+        super().__init__()
+        self.state = state
+
+    async def on_submit(self, interaction: discord.Interaction):
+        url = self.url.value.strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            await interaction.response.send_message("❌ URL must start with `http://` or `https://`.", ephemeral=True)
+            return
+        self.state.buttons.append({"label": self.label.value.strip(), "url": url})
+        await interaction.response.edit_message(embed=_step3_embed(self.state), view=Step3ButtonsView(self.state))
+
+
+class Step3ButtonsView(ui.View):
+    def __init__(self, state: WizardState):
+        super().__init__(timeout=300)
+        self.state = state
+        select = ui.Select(
+            placeholder="Button actions (optional)",
+            options=[
+                discord.SelectOption(label="Add Button", description="Add a clickable URL button to the sticky", value="add", emoji="➕"),
+                discord.SelectOption(label="Clear All Buttons", description="Remove all added buttons", value="clear", emoji="🗑️"),
+            ],
+            min_values=1, max_values=1, row=0,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+        back_btn = ui.Button(label="↩️ Back", style=discord.ButtonStyle.secondary, row=1)
+        back_btn.callback = self._back
+        self.add_item(back_btn)
+        next_btn = ui.Button(label="Next ▶️", style=discord.ButtonStyle.primary, row=1)
+        next_btn.callback = self._next
+        self.add_item(next_btn)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        if interaction.data["values"][0] == "add":
+            if len(self.state.buttons) >= 5:
+                await interaction.response.send_message("❌ Maximum of 5 buttons allowed.", ephemeral=True)
+                return
+            await interaction.response.send_modal(AddButtonModal(self.state))
+        else:
+            self.state.buttons.clear()
+            await interaction.response.edit_message(embed=_step3_embed(self.state), view=Step3ButtonsView(self.state))
+
+    async def _back(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=_step2_embed(), view=Step2ChannelView(self.state))
+
+    async def _next(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=_step4_embed(self.state.delay), view=Step4DelayView(self.state))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STICKY PIN — STEP 4: DELAY
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _step4_embed(selected: int = 3) -> discord.Embed:
+    e = discord.Embed(
+        title="📌 Create Sticky Pin — Step 4 of 5",
+        description=f"**Set Re-pin Delay**\nHow many seconds to wait after a new message before re-pinning?\n\n*A short delay groups rapid messages together and reduces API usage.*\n\n**Currently selected:** `{selected}s`",
+        color=0x7289DA,
+    )
+    e.set_footer(text="Step 4 / 5 • Delay Setting")
+    return e
+
+
+class Step4DelayView(ui.View):
+    def __init__(self, state: WizardState):
+        super().__init__(timeout=300)
+        self.state = state
+        select = ui.Select(
+            placeholder="Select re-pin delay",
+            options=[
+                discord.SelectOption(label="1 second",  description="Re-pin almost instantly after each message", value="1",  emoji="⚡", default=(state.delay == 1)),
+                discord.SelectOption(label="3 seconds", description="Short wait — good for active channels",      value="3",  emoji="🕐", default=(state.delay == 3)),
+                discord.SelectOption(label="5 seconds", description="Balanced delay for most channels",           value="5",  emoji="🕑", default=(state.delay == 5)),
+                discord.SelectOption(label="10 seconds", description="Calm channels or lower API usage",          value="10", emoji="🕒", default=(state.delay == 10)),
+                discord.SelectOption(label="15 seconds", description="Slowest — best for low-traffic channels",  value="15", emoji="🕓", default=(state.delay == 15)),
+            ],
+            min_values=1, max_values=1, row=0,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+        back_btn = ui.Button(label="↩️ Back", style=discord.ButtonStyle.secondary, row=1)
+        back_btn.callback = self._back
+        self.add_item(back_btn)
+        next_btn = ui.Button(label="Next ▶️", style=discord.ButtonStyle.primary, row=1)
+        next_btn.callback = self._next
+        self.add_item(next_btn)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        self.state.delay = int(interaction.data["values"][0])
+        await interaction.response.edit_message(embed=_step4_embed(self.state.delay), view=Step4DelayView(self.state))
+
+    async def _back(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=_step3_embed(self.state), view=Step3ButtonsView(self.state))
+
+    async def _next(self, interaction: discord.Interaction):
+        cog = getattr(self.state, "_cog", None)
+        await interaction.response.edit_message(embed=_step5_embed(self.state), view=Step5PreviewView(self.state, cog))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STICKY PIN — STEP 5: PREVIEW & SAVE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _step5_embed(state: WizardState) -> discord.Embed:
+    btn_str = "\n".join(f"• **{b['label']}** → {b['url']}" for b in state.buttons) if state.buttons else "*None*"
+    if state.pin_type == "embed":
+        preview = (
+            f"**Title:** {state.embed_title or '*(none)*'}\n"
+            f"**Description:**\n> {state.embed_description[:200]}{'...' if len(state.embed_description) > 200 else ''}\n"
+            f"**Footer:** {state.embed_footer or '*(none)*'}\n"
+            f"**Color:** #{state.embed_color:06X}"
+        )
+        type_label = "🎨 Embed"
+    else:
+        preview = f"> {state.content[:300]}{'...' if len(state.content) > 300 else ''}"
+        type_label = "📝 Text"
+
+    e = discord.Embed(
+        title="📌 Create Sticky Pin — Step 5 of 5",
+        description=(
+            f"**Preview & Save**\nReview your sticky pin before saving.\n\n"
+            f"**Type:** {type_label}\n**Channels:** {_fmt_channels(state.channels)}\n"
+            f"**Delay:** {state.delay}s | **Buttons:** {len(state.buttons)}\n\n"
+            f"**Content Preview:**\n{preview}\n\n**Buttons:**\n{btn_str}"
+        ),
+        color=0x57F287,
+    )
+    e.set_footer(text="Step 5 / 5 • Preview & Save")
+    return e
+
+
+class Step5PreviewView(ui.View):
+    def __init__(self, state: WizardState, cog=None):
+        super().__init__(timeout=300)
+        self.state = state
+        self.cog = cog or getattr(state, "_cog", None)
+
+    @ui.button(label="✅ Save Pin", style=discord.ButtonStyle.success, row=0)
+    async def save_pin(self, interaction: discord.Interaction, _: ui.Button):
+        guild_id = self.state.guild_id
+        pins = _pins.setdefault(guild_id, [])
+        existing = next((p for p in pins if p.pin_id == self.state.pin_id), None)
+
+        if existing:
+            existing.pin_type = self.state.pin_type
+            existing.content = self.state.content
+            existing.embed_title = self.state.embed_title
+            existing.embed_description = self.state.embed_description
+            existing.embed_footer = self.state.embed_footer
+            existing.embed_color = self.state.embed_color
+            existing.channels = self.state.channels
+            existing.buttons = self.state.buttons
+            existing.delay = self.state.delay
+            pin = existing
+        else:
+            pin = StickyPin(self.state.pin_id, guild_id, self.state.creator_id)
+            pin.pin_type = self.state.pin_type
+            pin.content = self.state.content
+            pin.embed_title = self.state.embed_title
+            pin.embed_description = self.state.embed_description
+            pin.embed_footer = self.state.embed_footer
+            pin.embed_color = self.state.embed_color
+            pin.channels = self.state.channels
+            pin.buttons = self.state.buttons
+            pin.delay = self.state.delay
+            pins.append(pin)
+
+        saved_embed = discord.Embed(
+            title="✅ Sticky Pin Saved!",
+            description=(
+                f"Your sticky pin is now active.\n\n"
+                f"**ID:** `{_short_id(pin.pin_id)}`\n"
+                f"**Type:** {'📝 Text' if pin.pin_type == 'text' else '🎨 Embed'}\n"
+                f"**Channels:** {_fmt_channels(pin.channels)}\n"
+                f"**Delay:** {pin.delay}s | **Buttons:** {len(pin.buttons)}\n\n"
+                f"The sticky will appear at the bottom of each selected channel after new messages are sent."
+            ),
+            color=0x57F287,
+        )
+        saved_embed.set_footer(text=f"Pin ID: {_short_id(pin.pin_id)} • /stickypin → List Pins to manage")
+        _db_save_pin(pin)
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(embed=saved_embed, view=self)
+
+        if self.cog:
+            for cid in pin.channels:
+                channel = interaction.guild.get_channel(cid)
+                if channel:
+                    asyncio.create_task(self.cog._post_sticky(channel, pin))
+
+    @ui.button(label="✏️ Edit Content", style=discord.ButtonStyle.secondary, row=0)
+    async def edit_content(self, interaction: discord.Interaction, _: ui.Button):
+        if self.state.pin_type == "text":
+            await interaction.response.send_modal(TextContentModal(self.state))
+        else:
+            await interaction.response.send_modal(EmbedContentModal(self.state))
+
+    @ui.button(label="↩️ Back", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, _: ui.Button):
+        await interaction.response.edit_message(embed=_step4_embed(self.state.delay), view=Step4DelayView(self.state))
+
+    @ui.button(label="🏠 Main Menu", style=discord.ButtonStyle.secondary, row=1)
+    async def main_menu(self, interaction: discord.Interaction, _: ui.Button):
+        await interaction.response.edit_message(embed=_main_menu_embed(), view=MainMenuView(self.cog))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STICKY PIN — EDIT & DELETE FLOWS
+# ══════════════════════════════════════════════════════════════════════════════
+
+class EditSelectView(ui.View):
+    def __init__(self, pins: list[StickyPin], cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self._pins = pins
+        select = ui.Select(
+            placeholder="Select a pin to edit...",
+            options=[discord.SelectOption(label=f"[{_short_id(p.pin_id)}] {p.pin_type.title()}", description=f"{len(p.channels)} channel(s) | {p.delay}s delay", value=p.pin_id, emoji="📌") for p in pins[:25]],
+            min_values=1, max_values=1,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+        back_btn = ui.Button(label="↩️ Back to Menu", style=discord.ButtonStyle.secondary)
+        back_btn.callback = self._back
+        self.add_item(back_btn)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        pin = next((p for p in self._pins if p.pin_id == interaction.data["values"][0]), None)
+        if not pin:
+            await interaction.response.send_message("❌ Pin not found.", ephemeral=True)
+            return
+        state = WizardState(interaction.guild.id, interaction.user.id, edit_pin=pin)
+        state._cog = self.cog
+        await interaction.response.edit_message(embed=_step1_embed(), view=Step1TypeView(state, from_edit=True))
+
+    async def _back(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=_main_menu_embed(), view=MainMenuView(self.cog))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+class DeleteSelectView(ui.View):
+    def __init__(self, pins: list[StickyPin], cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self._pins = pins
+        select = ui.Select(
+            placeholder="Select a pin to delete...",
+            options=[discord.SelectOption(label=f"[{_short_id(p.pin_id)}] {p.pin_type.title()}", description=f"{len(p.channels)} channel(s) | {p.delay}s delay", value=p.pin_id, emoji="📌") for p in pins[:25]],
+            min_values=1, max_values=1,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+        back_btn = ui.Button(label="↩️ Back to Menu", style=discord.ButtonStyle.secondary)
+        back_btn.callback = self._back
+        self.add_item(back_btn)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        pin_id = interaction.data["values"][0]
+        pin = next((p for p in self._pins if p.pin_id == pin_id), None)
+        if not pin:
+            await interaction.response.send_message("❌ Pin not found.", ephemeral=True)
+            return
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title="🗑️ Confirm Delete",
+                description=f"Are you sure you want to delete pin `{_short_id(pin_id)}`?\n\n**Type:** {'📝 Text' if pin.pin_type == 'text' else '🎨 Embed'}\n**Channels:** {_fmt_channels(pin.channels)}\n**Delay:** {pin.delay}s",
+                color=0xFEE75C,
+            ),
+            view=DeleteConfirmView(pin_id, interaction.guild.id, self.cog),
+        )
+
+    async def _back(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=_main_menu_embed(), view=MainMenuView(self.cog))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+class DeleteConfirmView(ui.View):
+    def __init__(self, pin_id: str, guild_id: int, cog):
+        super().__init__(timeout=60)
+        self.pin_id = pin_id
+        self.guild_id = guild_id
+        self.cog = cog
+
+    @ui.button(label="🗑️ Confirm Delete", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _: ui.Button):
+        pins = _pins.get(self.guild_id, [])
+        pin = next((p for p in pins if p.pin_id == self.pin_id), None)
+        if pin:
+            for cid in pin.channels:
+                task = _pending.pop(cid, None)
+                if task and not task.done():
+                    task.cancel()
+            _pins[self.guild_id] = [p for p in pins if p.pin_id != self.pin_id]
+            _db_delete_pin(self.pin_id)
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            embed=discord.Embed(title="✅ Pin Deleted", description=f"Sticky pin `{_short_id(self.pin_id)}` has been removed.", color=0x57F287),
+            view=BackToMenuView(self.cog),
+        )
+
+    @ui.button(label="↩️ Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _: ui.Button):
+        await interaction.response.edit_message(
+            embed=discord.Embed(title="🗑️ Delete a Pin", description="Select which pin you want to delete.", color=0xED4245),
+            view=DeleteSelectView(_pins.get(self.guild_id, []), self.cog),
+        )
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STICKY PIN — PAUSE / RESUME
+# ══════════════════════════════════════════════════════════════════════════════
+
+class PauseSelectView(ui.View):
+    def __init__(self, pins: list[StickyPin], cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self._pins = pins
+        select = ui.Select(
+            placeholder="Select a pin to pause or resume...",
+            options=[
+                discord.SelectOption(
+                    label=f"[{_short_id(p.pin_id)}] {p.pin_type.title()}",
+                    description=f"{'⏸ PAUSED' if p.paused else '▶ Active'} | {len(p.channels)} channel(s) | {p.delay}s delay",
+                    value=p.pin_id,
+                    emoji="⏸️" if p.paused else "▶️",
+                )
+                for p in pins[:25]
+            ],
+            min_values=1,
+            max_values=1,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+        back_btn = ui.Button(label="↩️ Back to Menu", style=discord.ButtonStyle.secondary)
+        back_btn.callback = self._back
+        self.add_item(back_btn)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        pin_id = interaction.data["values"][0]
+        guild_id = interaction.guild.id
+        pin = next((p for p in _pins.get(guild_id, []) if p.pin_id == pin_id), None)
+        if not pin:
+            await interaction.response.send_message("❌ Pin not found.", ephemeral=True)
+            return
+
+        if pin.paused:
+            embed = discord.Embed(
+                title="⏸️ Pin is Currently Paused",
+                description=(
+                    f"**Pin:** `{_short_id(pin_id)}`\n"
+                    f"**Type:** {'📝 Text' if pin.pin_type == 'text' else '🎨 Embed'}\n"
+                    f"**Channels:** {_fmt_channels(pin.channels)}\n\n"
+                    "This pin is paused and not reposting.\nPress **▶️ Resume** to make it active again."
+                ),
+                color=0xFEE75C,
+            )
+        else:
+            embed = discord.Embed(
+                title="▶️ Pin is Currently Active",
+                description=(
+                    f"**Pin:** `{_short_id(pin_id)}`\n"
+                    f"**Type:** {'📝 Text' if pin.pin_type == 'text' else '🎨 Embed'}\n"
+                    f"**Channels:** {_fmt_channels(pin.channels)}\n\n"
+                    "This pin is active and reposting normally.\nPress **⏸️ Pause** to stop it temporarily."
+                ),
+                color=0x57F287,
+            )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=PauseConfirmView(pin_id, guild_id, self.cog),
+        )
+
+    async def _back(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=_main_menu_embed(), view=MainMenuView(self.cog))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+class PauseConfirmView(ui.View):
+    def __init__(self, pin_id: str, guild_id: int, cog):
+        super().__init__(timeout=120)
+        self.pin_id = pin_id
+        self.guild_id = guild_id
+        self.cog = cog
+
+    @ui.button(label="⏸️ Pause", style=discord.ButtonStyle.danger)
+    async def pause_btn(self, interaction: discord.Interaction, button: ui.Button):
+        await self._apply(interaction, paused=True)
+
+    @ui.button(label="▶️ Resume", style=discord.ButtonStyle.success)
+    async def resume_btn(self, interaction: discord.Interaction, button: ui.Button):
+        await self._apply(interaction, paused=False)
+
+    @ui.button(label="↩️ Back", style=discord.ButtonStyle.secondary)
+    async def back_btn(self, interaction: discord.Interaction, _: ui.Button):
+        pins = _pins.get(self.guild_id, [])
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title="⏸️ Pause / Resume a Pin",
+                description="Select a pin to pause or resume it.",
+                color=0xFEE75C,
+            ),
+            view=PauseSelectView(pins, self.cog),
+        )
+
+    async def _apply(self, interaction: discord.Interaction, paused: bool):
+        pin = next((p for p in _pins.get(self.guild_id, []) if p.pin_id == self.pin_id), None)
+        if not pin:
+            await interaction.response.send_message("❌ Pin not found.", ephemeral=True)
+            return
+
+        pin.paused = paused
+        _db_save_pin(pin)
+
+        if paused:
+            for cid in pin.channels:
+                task = _pending.get(cid)
+                if task and not task.done():
+                    task.cancel()
+            result_embed = discord.Embed(
+                title="⏸️ Pin Paused",
+                description=f"Sticky pin `{_short_id(self.pin_id)}` is now **paused** and will not repost until resumed.",
+                color=0xFEE75C,
+            )
+        else:
+            result_embed = discord.Embed(
+                title="▶️ Pin Resumed",
+                description=f"Sticky pin `{_short_id(self.pin_id)}` is now **active** and will repost on new messages.",
+                color=0x57F287,
+            )
+
+        pins = _pins.get(self.guild_id, [])
+        await interaction.response.edit_message(
+            embed=result_embed,
+            view=PauseSelectView(pins, self.cog),
+        )
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STICKY PIN — LIST EMBED
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _list_embed(pins: list[StickyPin]) -> discord.Embed:
+    e = discord.Embed(title=f"📋 Sticky Pins ({len(pins)} total)", color=0x7289DA)
+    for pin in pins[:25]:
+        channels_str = ", ".join(f"<#{cid}>" for cid in pin.channels[:5])
+        if len(pin.channels) > 5:
+            channels_str += f" (+{len(pin.channels) - 5} more)"
+        status = "⏸ Paused" if pin.paused else "▶ Active"
+        e.add_field(
+            name=f"[{_short_id(pin.pin_id)}] {'📝 Text' if pin.pin_type == 'text' else '🎨 Embed'} — {status}",
+            value=f"**Channels:** {channels_str or '*(none)*'}\n**Delay:** {pin.delay}s | **Buttons:** {len(pin.buttons)}",
+            inline=False,
+        )
+    e.set_footer(text="Use /stickypin → Pause/Resume to toggle a pin")
+    return e
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ADMIN COG
+# ══════════════════════════════════════════════════════════════════════════════
+
+class AdminCog(commands.Cog):
+    """Admin and owner-only commands, plus sticky pin management."""
+    
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-
-    # Create the command group
-    roblox = app_commands.Group(name="roblox", description="Roblox-related tools")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # GROUP INFO
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @roblox.command(name="group", description="Display information about Neroniel's Roblox Groups")
-    async def group_info(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-
-        async with aiohttp.ClientSession() as session:
-            for group_id in ALL_GROUP_IDS:
-                try:
-                    # Fetch group info
-                    async with session.get(f"https://groups.roblox.com/v1/groups/{group_id}") as resp:
-                        if resp.status != 200:
-                            continue
-                        data = await resp.json()
-
-                    # Fetch icon
-                    icon_url = None
-                    try:
-                        async with session.get(
-                            f"https://thumbnails.roproxy.com/v1/groups/icons?groupIds={group_id}&size=420x420&format=Png"
-                        ) as icon_resp:
-                            if icon_resp.status == 200:
-                                icon_data = await icon_resp.json()
-                                if icon_data.get("data"):
-                                    icon_url = icon_data["data"][0]["imageUrl"]
-                    except Exception:
-                        pass
-
-                    embed = create_embed()
-                    embed.add_field(
-                        name="Group Name",
-                        value=f"[{data['name']}](https://www.roblox.com/groups/{group_id})",
-                        inline=False,
-                    )
-                    embed.add_field(
-                        name="Description", 
-                        value=data.get("description", "No description") or "No description",
-                        inline=False,
-                    )
-                    embed.add_field(name="Group ID", value=str(data["id"]), inline=True)
-
-                    owner = data.get("owner")
-                    owner_link = (
-                        f"[{owner['username']}](https://www.roblox.com/users/{owner['userId']}/profile)"
-                        if owner else "No Owner"
-                    )
-                    embed.add_field(name="Owner", value=owner_link, inline=True)
-                    embed.add_field(name="Members", value=f"{data['memberCount']:,}", inline=True)
-
-                    if icon_url:
-                        embed.set_thumbnail(url=icon_url)
-
-                    await interaction.followup.send(embed=embed)
-                    await asyncio.sleep(0.5)
-
-                except Exception as e:
-                    await interaction.followup.send(f"❌ Error fetching group {group_id}: {e}")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # PROFILE
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @roblox.command(name="profile", description="View a player's profile")
-    @app_commands.describe(user="Roblox username or user ID")
-    async def profile(self, interaction: discord.Interaction, user: str):
-        await interaction.response.defer()
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Resolve user
-                if user.isdigit():
-                    user_id = int(user)
-                    async with session.get(f"https://users.roblox.com/v1/users/{user_id}") as resp:
-                        if resp.status != 200:
-                            return await interaction.followup.send("❌ User not found.", ephemeral=True)
-                        full_data = await resp.json()
-                        username = full_data["name"]
-                        display_name = full_data["displayName"]
-                else:
-                    async with session.post(
-                        "https://users.roblox.com/v1/usernames/users",
-                        json={"usernames": [user]},
-                        headers={"Content-Type": "application/json"},
-                    ) as resp:
-                        data = await resp.json()
-                        if not data["data"]:
-                            return await interaction.followup.send("❌ User not found.", ephemeral=True)
-                        user_id = data["data"][0]["id"]
-                        display_name = data["data"][0]["displayName"]
-
-                    async with session.get(f"https://users.roblox.com/v1/users/{user_id}") as resp:
-                        full_data = await resp.json()
-                        username = full_data["name"]
-
-                # Get presence
-                status = "Offline"
-                last_online = "N/A"
-                async with session.post(
-                    "https://presence.roblox.com/v1/presence/users",
-                    json={"userIds": [user_id]},
-                ) as resp:
-                    if resp.status == 200:
-                        p = (await resp.json())["userPresences"][0]
-                        presence_type = p.get("userPresenceType", 0)
-
-                        if presence_type == 1:
-                            status = "Online"
-                        elif presence_type == 2:
-                            status = "In Game"
-                        elif presence_type == 3:
-                            status = "In Studio"
-
-                        if p.get("lastOnline"):
-                            last_online = isoparse(p["lastOnline"]).astimezone(PH_TIMEZONE).strftime("%A, %d %B %Y • %I:%M %p")
-
-                # Get avatar
-                thumb_url = f"https://thumbnails.roproxy.com/v1/users/avatar-headshot?userIds={user_id}&size=420x420&format=Png"
-                async with session.get(thumb_url) as resp:
-                    image_url = (await resp.json())["data"][0]["imageUrl"]
-
-                # Build Components V2
-                created_at = isoparse(full_data["created"])
-                created_unix = int(created_at.timestamp())
-                description = full_data.get("description") or "N/A"
-
-                verified = full_data.get("hasVerifiedBadge", False)
-                emoji = Emojis.VERIFIED if verified else ""
-
-                # Get friend counts
-                async with session.get(f"https://friends.roblox.com/v1/users/{user_id}/friends/count") as r1, \
-                           session.get(f"https://friends.roblox.com/v1/users/{user_id}/followers/count") as r2, \
-                           session.get(f"https://friends.roblox.com/v1/users/{user_id}/followings/count") as r3:
-                    friends = (await r1.json()).get("count", 0)
-                    followers = (await r2.json()).get("count", 0)
-                    followings = (await r3.json()).get("count", 0)
-
-                # Get premium status (requires cookie)
-                premium = False
-                try:
-                    async with session.get(
-                        f"https://premiumfeatures.roblox.com/v1/users/{user_id}/validate-membership",
-                        headers={"Cookie": os.getenv("ROBLOX_COOKIE")},
-                    ) as r4:
-                        premium = await r4.json() if r4.status == 200 else False
-                except Exception:
-                    pass
-
-                status_line = f"**Status:** {status}"
-                if status == "Offline" and last_online != "N/A":
-                    status_line += f" ({last_online})"
-
-                now_unix = int(datetime.now(PH_TIMEZONE).timestamp())
-
-                badge_emojis = ""
-                if verified:
-                    badge_emojis += f" {Emojis.VERIFIED}"
-                if premium:
-                    badge_emojis += f" {Emojis.PREMIUM}"
-
-                container = discord.ui.Container(
-                    discord.ui.Section(
-                        discord.ui.TextDisplay(f"### [{display_name}](https://www.roblox.com/users/{user_id}/profile)"),
-                        discord.ui.TextDisplay(f"## Roblox Information\n**@{username} ({user_id})**{badge_emojis}"),
-                        discord.ui.TextDisplay(f"**Account Created:** <t:{created_unix}:f>"),
-                        accessory=discord.ui.Thumbnail(image_url),
-                    ),
-                    discord.ui.Separator(),
-                    discord.ui.TextDisplay("**## Description**"),
-                    discord.ui.TextDisplay(f"```{description[:1000]}```"),
-                    discord.ui.Separator(),
-                    discord.ui.TextDisplay(f"**Connections:** {friends}/{followers}/{followings}\n{status_line}"),
-                    discord.ui.Separator(visible=False),
-                    discord.ui.TextDisplay(f"-# Neroniel • <t:{now_unix}:f>"),
-                )
-
-                view = discord.ui.LayoutView()
-                view.add_item(container)
-                await interaction.followup.send(view=view)
-
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # AVATAR
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @roblox.command(name="avatar", description="Display a player's full-body avatar")
-    @app_commands.describe(user="Roblox username or user ID")
-    async def avatar(self, interaction: discord.Interaction, user: str):
-        await interaction.response.defer()
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Resolve user
-                if user.isdigit():
-                    user_id = int(user)
-                else:
-                    async with session.post(
-                        "https://users.roblox.com/v1/usernames/users",
-                        json={"usernames": [user]},
-                    ) as resp:
-                        data = await resp.json()
-                        if not data["data"]:
-                            return await interaction.followup.send("❌ User not found.", ephemeral=True)
-                        user_id = data["data"][0]["id"]
-
-                # Get avatar
-                thumb_url = f"https://thumbnails.roblox.com/v1/users/avatar?userIds={user_id}&size=420x420&format=Png&isCircular=false"
-                async with session.get(thumb_url) as resp:
-                    data = await resp.json()
-                    image_url = data["data"][0]["imageUrl"]
-
-                embed = create_embed()
-                embed.set_image(url=image_url)
-                await interaction.followup.send(embed=embed)
-
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # STOCKS
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @roblox.command(name="stocks", description="Check Robux balances across all managed groups")
-    async def stocks(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-
-        all_data = {}
-        all_visible = {}
-
-        async def fetch_group_data(session, group_id, cookie, key):
-            data = {f"{key}_funds": 0, f"{key}_pending": 0}
-            visible = {f"{key}_funds": False, f"{key}_pending": False}
-            headers = {"Cookie": cookie}
-
-            try:
-                async with session.get(
-                    f"https://economy.roblox.com/v1/groups/{group_id}/currency",
-                    headers=headers,
-                ) as r:
-                    if r.status == 200:
-                        res = await r.json()
-                        data[f"{key}_funds"] = res.get("robux", 0)
-                        visible[f"{key}_funds"] = True
-                        # Default pending to visible (0) when cookie is valid
-                        visible[f"{key}_pending"] = True
-
-                await asyncio.sleep(0.3)
-
-                async with session.get(
-                    f"https://economy.roblox.com/v2/groups/{group_id}/transactions/totals?timeFrame=Month&transactionType=summary",
-                    headers=headers,
-                ) as r:
-                    if r.status == 200:
-                        res = await r.json()
-                        data[f"{key}_pending"] = res.get("pendingRobuxTotal", 0)
-
-            except Exception as e:
-                print(f"[STOCKS] Error fetching {key}: {e}")
-
-            return data, visible
-
-        async with aiohttp.ClientSession() as session:
-            for key, cfg in ROBLOX_GROUPS.items():
-                cookie = os.getenv(cfg["cookie_env"])
-                if not cookie:
-                    continue
-
-                data, visible = await fetch_group_data(session, cfg["id"], cookie, key)
-                all_data.update(data)
-                all_visible.update(visible)
-                await asyncio.sleep(0.3)
-
-            # Fetch personal account 1
-            roblox_stocks_cookie = os.getenv("ROBLOX_STOCKS")
-            roblox_user_id = os.getenv("ROBLOX_STOCKS_ID")
-
-            if roblox_stocks_cookie and roblox_user_id:
-                headers1 = {"Cookie": roblox_stocks_cookie}
-                try:
-                    async with session.get(
-                        f"https://economy.roblox.com/v1/users/{roblox_user_id}/currency",
-                        headers=headers1,
-                    ) as r:
-                        if r.status == 200:
-                            res = await r.json()
-                            all_data["account_balance"] = res.get("robux", 0)
-                            all_visible["account_balance"] = True
-                            # Default pending to visible (0) when cookie is valid
-                            all_data["account_pending"] = 0
-                            all_visible["account_pending"] = True
-                except Exception:
-                    all_data["account_balance"] = 0
-                    all_visible["account_balance"] = False
-
-                await asyncio.sleep(0.3)
-
-                try:
-                    async with session.get(
-                        f"https://economy.roblox.com/v2/users/{roblox_user_id}/transaction-totals?timeFrame=Month&transactionType=summary",
-                        headers=headers1,
-                    ) as r:
-                        if r.status == 200:
-                            res = await r.json()
-                            all_data["account_pending"] = res.get("pendingRobuxTotal", 0)
-                except Exception as e:
-                    print(f"[STOCKS] account1 pending error: {e}")
-
-            # Fetch personal account 2
-            roblox_stocks_cookie2 = os.getenv("ROBLOX_STOCKS2")
-            roblox_user_id2 = os.getenv("ROBLOX_STOCKS_ID2")
-
-            if roblox_stocks_cookie2 and roblox_user_id2:
-                headers2 = {"Cookie": roblox_stocks_cookie2}
-                try:
-                    async with session.get(
-                        f"https://economy.roblox.com/v1/users/{roblox_user_id2}/currency",
-                        headers=headers2,
-                    ) as r:
-                        if r.status == 200:
-                            res = await r.json()
-                            all_data["account_balance2"] = res.get("robux", 0)
-                            all_visible["account_balance2"] = True
-                            # Default pending to visible (0) when cookie is valid
-                            all_data["account_pending2"] = 0
-                            all_visible["account_pending2"] = True
-                except Exception:
-                    all_data["account_balance2"] = 0
-                    all_visible["account_balance2"] = False
-
-                await asyncio.sleep(0.3)
-
-                try:
-                    async with session.get(
-                        f"https://economy.roblox.com/v2/users/{roblox_user_id2}/transaction-totals?timeFrame=Month&transactionType=summary",
-                        headers=headers2,
-                    ) as r:
-                        if r.status == 200:
-                            res = await r.json()
-                            all_data["account_pending2"] = res.get("pendingRobuxTotal", 0)
-                except Exception as e:
-                    print(f"[STOCKS] account2 pending error: {e}")
-
-        def fmt(key):
-            return f"{Emojis.ROBUX} {all_data.get(key, 0):,}" if all_visible.get(key) else "||HIDDEN||"
-
-        # ── Group Payout lines ──
-        group_lines = []
-        for key, cfg in ROBLOX_GROUPS.items():
-            group_lines.append(f"**⌖ __{cfg['label']}__**")
-            group_lines.append(f"{fmt(f'{key}_funds')} | {fmt(f'{key}_pending')}")
-
-        # ── Personal Account lines ── always shown, ||HIDDEN|| if cookie invalid
-        account_lines = [
-            f"**⌖ __Neroniel__ Account Balance**",
-            fmt("account_balance"),
-            fmt("account_balance2"),
-        ]
-
-        now_unix = int(datetime.now(PH_TIMEZONE).timestamp())
-        bot_avatar = interaction.client.user.avatar.url if interaction.client.user.avatar else None
-
-        thumbnail = discord.ui.Thumbnail(bot_avatar) if bot_avatar else discord.ui.Thumbnail(
-            "https://cdn.discordapp.com/embed/avatars/0.png"
-        )
-
-        container = discord.ui.Container(
-            discord.ui.Section(
-                discord.ui.TextDisplay("## Robux Stocks Information"),
-                discord.ui.TextDisplay("### Community Funds | Pending Robux"),
-                accessory=thumbnail,
-            ),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay("### Group Payout"),
-            discord.ui.TextDisplay("\n".join(group_lines)),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay("### Plus/Gamepass/In-Game Gift"),
-            discord.ui.TextDisplay(
-                f"**⌖ __Neroniel__ Account Balance**\n"
-                f"{fmt('account_balance')} | {fmt('account_pending')}\n"
-                f"{fmt('account_balance2')} | {fmt('account_pending2')}"
-            ),
-            discord.ui.Separator(visible=False),
-            discord.ui.TextDisplay(f"-# Neroniel • <t:{now_unix}:f>"),
-        )
-
-        view = discord.ui.LayoutView()
-        view.add_item(container)
-        await interaction.followup.send(view=view)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # GAMEPASS
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @roblox.command(name="gamepass", description="Generate a direct Gamepass link")
-    @app_commands.describe(id="The Roblox Gamepass ID", link="Roblox Creator Dashboard URL")
-    async def gamepass(self, interaction: discord.Interaction, id: int = None, link: str = None):
-        if id is not None and link is not None:
-            await interaction.response.send_message("❌ Provide either ID or Link, not both.", ephemeral=True)
-            return
-
-        if id is None and link is None:
-            await interaction.response.send_message("❌ Provide a Gamepass ID or Link.", ephemeral=True)
-            return
-
-        pass_id = id
-        if link:
-            match = re.search(r'/passes/(\d+)/', link)
-            if match:
-                pass_id = match.group(1)
-            else:
-                await interaction.response.send_message("❌ Invalid Gamepass Link.", ephemeral=True)
-                return
-
-        base_url = f"https://www.roblox.com/game-pass/{pass_id}"
-        embed = create_embed()
-        embed.add_field(name="🔗 Link", value=f"`{base_url}`\n[View Gamepass]({base_url})", inline=False)
-
-        await interaction.response.send_message(embed=embed)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # DEVEX
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @roblox.command(name="devex", description="Convert Robux ↔ USD using DevEx rate")
-    @app_commands.describe(conversion_type="Choose conversion type", amount="Amount to convert")
-    @app_commands.choices(conversion_type=[
-        app_commands.Choice(name="Robux to USD", value="robux"),
-        app_commands.Choice(name="USD to Robux", value="usd"),
-    ])
-    async def devex(
-        self, 
-        interaction: discord.Interaction, 
-        conversion_type: app_commands.Choice[str], 
-        amount: float
-    ):
-        if amount <= 0:
-            await interaction.response.send_message("❗ Enter a positive amount.", ephemeral=True)
-            return
-
-        devex_rate = 0.0038
-
-        if conversion_type.value == "robux":
-            usd = amount * devex_rate
-            embed = create_embed(title="💎 DevEx: Robux → USD")
-            embed.description = f"Converting **{format_number(amount)} Robux** at $0.0038/Robux"
-            embed.add_field(name="Total USD", value=f"**${format_number(usd)}**", inline=False)
-        else:
-            robux = amount / devex_rate
-            embed = create_embed(title="💎 DevEx: USD → Robux")
-            embed.description = f"Converting **${format_number(amount)} USD** at $0.0038/Robux"
-            embed.add_field(name="Total Robux", value=f"{Emojis.ROBUX} **{format_number(robux)}**", inline=False)
-
-        await interaction.response.send_message(embed=embed)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAX
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @roblox.command(name="tax", description="Calculate Roblox's 30% marketplace tax")
-    @app_commands.describe(amount="Robux amount")
-    async def tax(self, interaction: discord.Interaction, amount: int):
-        if amount <= 0:
-            await interaction.response.send_message("❗ Enter a positive amount.", ephemeral=True)
-            return
-
-        after_tax = int(amount * 0.7)
-        tax_amount = amount - after_tax
-        price_to_get = int(amount / 0.7)
-
-        embed = create_embed(title="💰 Roblox Tax Calculator")
-        embed.add_field(name="Original Amount", value=f"{Emojis.ROBUX} {amount:,}", inline=False)
-        embed.add_field(name="After 30% Tax", value=f"{Emojis.ROBUX} {after_tax:,}", inline=True)
-        embed.add_field(name="Tax Amount", value=f"{Emojis.ROBUX} {tax_amount:,}", inline=True)
-        embed.add_field(name="Price to Get Full Amount", value=f"{Emojis.ROBUX} {price_to_get:,}", inline=False)
-
-        await interaction.response.send_message(embed=embed)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # GAME
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @roblox.command(name="game", description="Get detailed game info")
-    @app_commands.describe(id="Place ID or Game URL")
-    async def game(self, interaction: discord.Interaction, id: str):
-        await interaction.response.defer()
-
-        # Extract place ID
-        place_id = None
-        if id.isdigit():
-            place_id = int(id)
-        else:
-            match = re.search(r'roblox\.com/games/(\d+)', id)
-            if match:
-                place_id = int(match.group(1))
-
-        if not place_id:
-            return await interaction.followup.send("❌ Invalid Place ID or URL.", ephemeral=True)
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Get universe ID
-                async with session.get(
-                    f"https://apis.roblox.com/universes/v1/places/{place_id}/universe"
-                ) as resp:
-                    if resp.status != 200:
-                        raise Exception("Invalid Place ID")
-                    universe_id = (await resp.json()).get("universeId")
-
-                # Get game info
-                async with session.get(
-                    f"https://games.roblox.com/v1/games?universeIds={universe_id}"
-                ) as resp:
-                    data = await resp.json()
-                    if not data.get("data"):
-                        raise Exception("Game not found")
-
-                game = data["data"][0]
-
-                # Get votes
-                async with session.get(
-                    f"https://games.roblox.com/v1/games/votes?universeIds={universe_id}"
-                ) as resp:
-                    votes = (await resp.json())["data"][0] if resp.status == 200 else {}
-
-                # Get thumbnail
-                async with session.get(
-                    f"https://thumbnails.roblox.com/v1/games/icons?universeIds={universe_id}&size=150x150&format=Png"
-                ) as resp:
-                    thumb_data = await resp.json()
-                    thumbnail = thumb_data["data"][0]["imageUrl"] if thumb_data.get("data") else None
-
-                # Build embed
-                creator = game.get("creator", {})
-                creator_name = creator.get("name", "Unknown")
-
-                embed = create_embed()
-
-                game_link = f"https://www.roblox.com/games/{place_id}"
-                embed.add_field(
-                    name="", 
-                    value=f"**[{game['name']}]({game_link})**\n\n{game.get('description', '')[:500]}",
-                    inline=False,
-                )
-                embed.add_field(name="Creator", value=creator_name, inline=True)
-                embed.add_field(name="Playing", value=f"{game.get('playing', 0):,}", inline=True)
-                embed.add_field(name="Visits", value=f"{game.get('visits', 0):,}", inline=True)
-                embed.add_field(
-                    name="Likes | Dislikes | Favorites",
-                    value=f"{votes.get('upVotes', 0):,} | {votes.get('downVotes', 0):,} | {game.get('favoritedCount', 0):,}",
-                    inline=True,
-                )
-                embed.add_field(name="Max Players", value=str(game.get("maxPlayers", "N/A")), inline=True)
-
-                if thumbnail:
-                    embed.set_thumbnail(url=thumbnail)
-
-                await interaction.followup.send(embed=embed)
-
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # COMMUNITY SEARCH
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @roblox.command(name="community", description="Search public Roblox groups")
-    @app_commands.describe(name="Name or ID")
-    async def community(self, interaction: discord.Interaction, name: str):
-        await interaction.response.defer()
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                group_id = None
-
-                if name.isdigit():
-                    group_id = int(name)
-                else:
-                    # Search
-                    async with session.get(
-                        f"https://groups.roblox.com/v1/groups/search?keyword={name}&limit=100"
-                    ) as resp:
-                        if resp.status != 200:
-                            return await interaction.followup.send("❌ Search failed.", ephemeral=True)
-
-                        data = await resp.json()
-                        groups = data.get("data", [])
-
-                        if not groups:
-                            return await interaction.followup.send(f"❌ No group found: `{name}`", ephemeral=True)
-
-                        # Find best match
-                        clean_query = clean_text_for_match(name)
-                        best_match = None
-
-                        for group in groups:
-                            if clean_text_for_match(group["name"]) == clean_query:
-                                best_match = group
-                                break
-
-                        if not best_match:
-                            candidates = [g for g in groups if clean_query in clean_text_for_match(g["name"])]
-                            best_match = max(candidates, key=lambda g: g.get("memberCount", 0)) if candidates else groups[0]
-
-                        group_id = best_match["id"]
-
-                # Fetch group info
-                async with session.get(f"https://groups.roblox.com/v1/groups/{group_id}") as resp:
-                    if resp.status != 200:
-                        return await interaction.followup.send("❌ Group not found.", ephemeral=True)
-                    group_data = await resp.json()
-
-                # Fetch icon
-                icon_url = None
-                try:
-                    async with session.get(
-                        f"https://thumbnails.roproxy.com/v1/groups/icons?groupIds={group_id}&size=420x420&format=Png"
-                    ) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            if data.get("data"):
-                                icon_url = data["data"][0]["imageUrl"]
-                except Exception:
-                    pass
-
-                embed = create_embed()
-                embed.add_field(
-                    name="Group Name",
-                    value=f"[{group_data['name']}](https://www.roblox.com/groups/{group_id})",
-                    inline=False,
-                )
-                embed.add_field(
-                    name="Description",
-                    value=group_data.get("description", "No description") or "No description",
-                    inline=False,
-                )
-                embed.add_field(name="Group ID", value=str(group_data["id"]), inline=True)
-
-                owner = group_data.get("owner")
-                owner_link = (
-                    f"[{owner['username']}](https://www.roblox.com/users/{owner['userId']}/profile)"
-                    if owner else "No Owner"
-                )
-                embed.add_field(name="Owner", value=owner_link, inline=True)
-                embed.add_field(name="Members", value=f"{group_data['memberCount']:,}", inline=True)
-
-                if icon_url:
-                    embed.set_thumbnail(url=icon_url)
-
-                await interaction.followup.send(embed=embed)
-
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # RATE (SET CONVERSION RATES)
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @roblox.command(name="rate", description="Set global minimum conversion rates (Bot Owner only)")
-    @app_commands.describe(
-        payout="PHP per 1,000 Robux — Payout rate",
-        gift="PHP per 1,000 Robux — Gift rate",
-        nct="PHP per 1,000 Robux — NCT rate",
-        ct="PHP per 1,000 Robux — CT rate",
-    )
-    async def rate(
-        self,
-        interaction: discord.Interaction,
-        payout: float = None,
-        gift: float = None,
-        nct: float = None,
-        ct: float = None,
-    ):
-        from ..database import db
-        from ..utils import get_current_rates, format_php
-        from ..config import Emojis
-
+    
+    # ── DM COMMANDS (OWNER ONLY) ──────────────────────────────────────────────
+    
+    @app_commands.command(name="dm", description="Send a DM to a user (Owner only)")
+    @app_commands.describe(user="The user to message", message="The message to send")
+    async def dm(self, interaction: discord.Interaction, user: discord.User, message: str):
         if interaction.user.id != BOT_OWNER_ID:
-            await interaction.response.send_message("❌ Only the bot owner can use this command.", ephemeral=True)
+            await interaction.response.send_message("❌ Owner only.", ephemeral=True)
             return
-
+        try:
+            await user.send(message)
+            await interaction.response.send_message(f"✅ Sent DM to {user}", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message(f"❌ Can't DM {user}.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+    
+    @app_commands.command(name="dmall", description="Send DM to all members (Owner only)")
+    @app_commands.describe(message="The message to send", all_servers="Send to all servers? (Default: current server only)")
+    @app_commands.choices(all_servers=[
+        app_commands.Choice(name="YES", value="all"),
+        app_commands.Choice(name="NO", value="server"),
+    ])
+    async def dmall(self, interaction: discord.Interaction, message: str, all_servers: app_commands.Choice[str] = None):
+        if interaction.user.id != BOT_OWNER_ID:
+            await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+            return
+        scope = "server" if all_servers is None else all_servers.value
         await interaction.response.defer(ephemeral=True)
-
-        if not db.is_connected:
-            await interaction.followup.send("❌ Database not connected.", ephemeral=True)
+        success = 0
+        fail = 0
+        guilds = [interaction.guild] if scope == "server" else self.bot.guilds
+        for guild in guilds:
+            if not guild:
+                continue
+            if not guild.chunked:
+                try:
+                    await guild.chunk()
+                except Exception:
+                    continue
+            for member in guild.members:
+                if member.bot:
+                    continue
+                try:
+                    await member.send(message)
+                    success += 1
+                except Exception:
+                    fail += 1
+                await asyncio.sleep(1.5)
+        await interaction.followup.send(f"✅ Sent to **{success}** members. ❌ Failed: **{fail}**")
+    
+    # ── PURGE ─────────────────────────────────────────────────────────────────
+    
+    @app_commands.command(name="purge", description="Bulk-delete messages (Admin)")
+    @app_commands.describe(amount="Number of messages to delete")
+    async def purge(self, interaction: discord.Interaction, amount: int):
+        if amount <= 0:
+            await interaction.response.send_message("❗ Enter a positive number.", ephemeral=True)
             return
-
-        GLOBAL_KEY = "__global__"
-
-        # If no arguments, show current global minimums
-        if all(v is None for v in [payout, gift, nct, ct]):
-            doc = db.rates.find_one({"guild_id": GLOBAL_KEY}) or {}
-            embed = discord.Embed(title="📊 Global Minimum Rates", color=discord.Color.from_rgb(0, 0, 0))
-            robux_formatted = "1,000"
-
-            def _show(min_key):
-                min_val = doc.get(min_key)
-                return f"{Emojis.PHP} {format_php(min_val)}" if min_val is not None else "Not Set"
-
-            embed.add_field(name=f"{Emojis.ROBUX} {robux_formatted} • Payout", value=_show("payout_min"), inline=False)
-            embed.add_field(name=f"{Emojis.ROBUX} {robux_formatted} • Gift",   value=_show("gift_min"),   inline=False)
-            embed.add_field(name=f"{Emojis.ROBUX} {robux_formatted} • NCT",    value=_show("nct_min"),    inline=False)
-            embed.add_field(name=f"{Emojis.ROBUX} {robux_formatted} • CT",     value=_show("ct_min"),     inline=False)
-            embed.set_footer(text="These are the global minimums — /setrate cannot go below these in any server")
-            await interaction.followup.send(embed=embed, ephemeral=True)
+        if not (interaction.user.guild_permissions.manage_messages or interaction.user.id == BOT_OWNER_ID):
+            await interaction.response.send_message("❌ You need Manage Messages permission.", ephemeral=True)
             return
-
-        # Validate: no negatives or zeros
-        errors = []
-        for label, val in [("Payout", payout), ("Gift", gift), ("NCT", nct), ("CT", ct)]:
-            if val is not None and val <= 0:
-                errors.append(f"{label} must be greater than 0")
-        if errors:
-            await interaction.followup.send("❗ " + "\n".join(errors), ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            deleted = await interaction.channel.purge(limit=amount)
+            await interaction.followup.send(f"✅ Deleted **{len(deleted)}** messages.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ No permission.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+    
+    # ── ANNOUNCEMENT ──────────────────────────────────────────────────────────
+    
+    @app_commands.command(name="announcement", description="Create an announcement (Admin)")
+    async def announcement(self, interaction: discord.Interaction):
+        if not (interaction.user.guild_permissions.manage_messages or interaction.user.id == BOT_OWNER_ID):
+            await interaction.response.send_message("❌ You need Manage Messages permission.", ephemeral=True)
             return
-
-        # Save globally — these become the floor enforced by /setrate in ALL servers
-        update_fields = {"guild_id": GLOBAL_KEY, "updated_at": datetime.now(PH_TIMEZONE)}
-        if payout is not None:
-            update_fields["payout_min"] = payout
-        if gift is not None:
-            update_fields["gift_min"] = gift
-        if nct is not None:
-            update_fields["nct_min"] = nct
-        if ct is not None:
-            update_fields["ct_min"] = ct
-
-        db.rates.update_one({"guild_id": GLOBAL_KEY}, {"$set": update_fields}, upsert=True)
-
-        embed = discord.Embed(
-            title="✅ Global Minimum Rates Set",
-            description="These values are now the **global floor** for all servers.\n`/setrate` cannot go below them in any server.",
-            color=discord.Color.green(),
-        )
-        robux_formatted = "1,000"
-        if payout is not None:
-            embed.add_field(name="• Payout (min)", value=f"{Emojis.ROBUX} {robux_formatted} → {Emojis.PHP} {format_php(payout)}", inline=False)
-        if gift is not None:
-            embed.add_field(name="• Gift (min)",   value=f"{Emojis.ROBUX} {robux_formatted} → {Emojis.PHP} {format_php(gift)}", inline=False)
-        if nct is not None:
-            embed.add_field(name="• NCT (min)",    value=f"{Emojis.ROBUX} {robux_formatted} → {Emojis.PHP} {format_php(nct)}", inline=False)
-        if ct is not None:
-            embed.add_field(name="• CT (min)",     value=f"{Emojis.ROBUX} {robux_formatted} → {Emojis.PHP} {format_php(ct)}", inline=False)
-        embed.set_footer(text="Neroniel • /roblox rate")
-
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # ICON
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @roblox.command(name="icon", description="Fetch a game's official icon using Place ID or Game URL")
-    @app_commands.describe(id="Place ID or full Roblox Game URL")
-    async def icon(self, interaction: discord.Interaction, id: str):
-        place_id = None
-        if id.isdigit():
-            place_id = int(id)
+        await interaction.response.send_modal(AnnouncementModal(self.bot))
+    
+    # ── SAY ───────────────────────────────────────────────────────────────────
+    
+    @app_commands.command(name="say", description="Make the bot say something")
+    @app_commands.describe(message="The message to send")
+    async def say(self, interaction: discord.Interaction, message: str):
+        if "@everyone" in message or "@here" in message:
+            await interaction.response.send_message("❌ Cannot mention everyone/here.", ephemeral=True)
+            return
+        await interaction.response.send_message("✅ Sending...", ephemeral=True)
+        await interaction.channel.send(message)
+    
+    # ── CREATE INVITE (OWNER ONLY) ────────────────────────────────────────────
+    
+    @app_commands.command(name="createinvite", description="Generate invites for all servers (Owner only)")
+    async def createinvite(self, interaction: discord.Interaction):
+        if interaction.user.id != BOT_OWNER_ID:
+            await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        invites = []
+        for guild in self.bot.guilds:
+            try:
+                channel = next((ch for ch in guild.text_channels if ch.permissions_for(guild.me).create_instant_invite), None)
+                if channel:
+                    invite = await channel.create_invite(max_age=1800, reason="Owner request")
+                    invites.append(f"**{guild.name}** (`{guild.id}`): {invite.url}")
+                else:
+                    invites.append(f"**{guild.name}**: ❌ No suitable channel")
+            except discord.Forbidden:
+                invites.append(f"**{guild.name}**: ❌ No permission")
+            except Exception as e:
+                invites.append(f"**{guild.name}**: ❌ {e}")
+            await asyncio.sleep(0.5)
+        full_message = "\n".join(invites)
+        if len(full_message) > 1900:
+            chunks = [full_message[i:i+1900] for i in range(0, len(full_message), 1900)]
+            await interaction.followup.send(chunks[0], ephemeral=True)
+            for chunk in chunks[1:]:
+                await interaction.followup.send(chunk, ephemeral=True)
         else:
-            match = re.search(r'roblox\.com/games/(\d+)', id)
-            if match:
-                place_id = int(match.group(1))
-            else:
-                await interaction.response.send_message(
-                    "❌ Invalid input. Please provide a valid Place ID or Roblox Game URL.",
-                    ephemeral=True,
-                )
+            await interaction.followup.send(full_message, ephemeral=True)
+
+    # ── INVITE MANAGEMENT (ADMIN) ─────────────────────────────────────────────
+
+    @app_commands.command(name="adjustinvites", description="Add or remove invites from a user's count (Admin)")
+    @app_commands.describe(user="The user to adjust", amount="Positive to add, negative to remove")
+    async def adjustinvites(self, interaction: discord.Interaction, user: discord.User, amount: int):
+        if not (interaction.user.guild_permissions.administrator or interaction.user.id == BOT_OWNER_ID):
+            await interaction.response.send_message("❌ Administrator only.", ephemeral=True)
+            return
+        if amount == 0:
+            await interaction.response.send_message("❗ Amount cannot be zero.", ephemeral=True)
+            return
+        if not db.is_connected or db.invites is None:
+            await interaction.response.send_message("❌ Database unavailable.", ephemeral=True)
+            return
+        guild_id = str(interaction.guild.id)
+        user_id = str(user.id)
+        db.invites.update_one({"guild_id": guild_id, "user_id": user_id}, {"$inc": {"total": amount}}, upsert=True)
+        doc = db.invites.find_one({"guild_id": guild_id, "user_id": user_id})
+        new_total = max(doc.get("total", 0), 0) if doc else 0
+        if new_total < 0:
+            db.invites.update_one({"guild_id": guild_id, "user_id": user_id}, {"$set": {"total": 0}})
+            new_total = 0
+        action = f"+{amount}" if amount > 0 else str(amount)
+        embed = create_embed(title="✅ Invites Adjusted", description=f"**User:** {user.mention}\n**Change:** {action}\n**New Total:** {new_total} invite(s)", color=discord.Color.green())
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="resetinvites", description="Reset a user's invite count to zero (Admin)")
+    @app_commands.describe(user="The user whose invite count to reset")
+    async def resetinvites(self, interaction: discord.Interaction, user: discord.User):
+        if not (interaction.user.guild_permissions.administrator or interaction.user.id == BOT_OWNER_ID):
+            await interaction.response.send_message("❌ Administrator only.", ephemeral=True)
+            return
+        if not db.is_connected or db.invites is None:
+            await interaction.response.send_message("❌ Database unavailable.", ephemeral=True)
+            return
+        db.invites.update_one({"guild_id": str(interaction.guild.id), "user_id": str(user.id)}, {"$set": {"total": 0, "invited_users": []}}, upsert=True)
+        embed = create_embed(title="✅ Invites Reset", description=f"{user.mention}'s invite count has been reset to **0**.", color=discord.Color.orange())
+        await interaction.response.send_message(embed=embed)
+
+    # ── STICKY PIN ────────────────────────────────────────────────────────────
+
+    @app_commands.command(name="stickypin", description="Create and manage sticky pins in your server")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def stickypin(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=_main_menu_embed(), view=MainMenuView(self), ephemeral=True)
+
+    @stickypin.error
+    async def stickypin_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.MissingPermissions):
+            await interaction.response.send_message("❌ You need the **Manage Messages** permission to use sticky pins.", ephemeral=True)
+
+    # ── STICKY PIN: MESSAGE LISTENER ──────────────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if not message.guild:
+            return
+        # Skip our own sticky pin messages — three-layer guard:
+        # 1. _posting: channel is actively sending a sticky right now (pre-send race guard)
+        # 2. _sticky_ids: persistent set of every message ID we sent as a sticky
+        # 3. _last_msg: current known sticky IDs per channel+pin key
+        if self.bot.user and message.author.id == self.bot.user.id:
+            if (message.channel.id in _posting
+                    or message.id in _sticky_ids
+                    or message.id in _last_msg.values()):
                 return
-
-        await interaction.response.defer()
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"https://thumbnails.roblox.com/v1/places/gameicons?placeIds={place_id}&size=512x512&format=Png&isCircular=false"
-                ) as resp:
-                    if resp.status != 200:
-                        raise Exception("Failed to fetch icon")
-                    icon_data = await resp.json()
-                    if not icon_data.get("data") or not icon_data["data"][0].get("imageUrl"):
-                        raise Exception("No icon available")
-                    image = icon_data["data"][0]["imageUrl"]
-
-            embed = create_embed()
-            embed.set_image(url=image)
-            embed.set_footer(text="Neroniel • /roblox icon")
-            await interaction.followup.send(embed=embed)
-
-        except Exception as e:
-            await interaction.followup.send(f"❌ Failed to fetch game icon: `{str(e)}`", ephemeral=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # ASSET
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @roblox.command(name="asset", description="Fetch full Roblox asset info (Image, Shirt, Pants, etc.)")
-    @app_commands.describe(asset_id="Roblox Asset ID")
-    async def asset(self, interaction: discord.Interaction, asset_id: int):
-        await interaction.response.defer()
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-
-                async with session.get(
-                    f"https://economy.roblox.com/v2/assets/{asset_id}/details",
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status != 200:
-                        return await interaction.followup.send(
-                            f"❌ Asset not found (HTTP {resp.status}).", ephemeral=True
-                        )
-                    data = await resp.json()
-
-                name = data.get("Name", f"Asset {asset_id}")
-                description = (data.get("Description") or "").strip()
-                asset_type_id = data.get("AssetTypeId", 0)
-                asset_type = ASSET_TYPE_MAP.get(asset_type_id, f"Type {asset_type_id}")
-                template_asset_id = data.get("TemplateAssetId")
-                created_at = data.get("Created")
-                updated_at = data.get("Updated")
-
-                creator_data = data.get("Creator", {}) or {}
-                creator_name = creator_data.get("Name", "Unknown")
-                creator_type = str(creator_data.get("CreatorType", "User")).lower()
-                creator_id = creator_data.get("CreatorTargetId") or creator_data.get("Id")
-                has_verified = creator_data.get("HasVerifiedBadge", False)
-                verified_badge = f" {Emojis.VERIFIED}" if has_verified else ""
-
-                if creator_id:
-                    if creator_type == "group":
-                        creator_value = f"[{creator_name}{verified_badge}](https://www.roblox.com/groups/{creator_id})"
-                    else:
-                        creator_value = f"[{creator_name}{verified_badge}](https://www.roblox.com/users/{creator_id}/profile)"
-                else:
-                    creator_value = f"{creator_name}{verified_badge}"
-
-                if asset_type_id in [11, 12, 2] and template_asset_id:
-                    delivery_id = template_asset_id
-                else:
-                    delivery_id = asset_id
-
-                delivery_url = f"https://assetdelivery.roblox.com/v1/asset/?id={delivery_id}"
-                image_url = None
-
-                try:
-                    async with session.head(delivery_url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as head_resp:
-                        content_type = head_resp.headers.get("Content-Type", "")
-                        if "image" in content_type:
-                            image_url = delivery_url
-                except Exception:
-                    pass
-
-                embed = create_embed()
-                name_link = f"[{name}](https://www.roblox.com/catalog/{asset_id})"
-                embed.add_field(name="", value=f"**{name_link}**", inline=False)
-
-                if description:
-                    desc_text = description if len(description) <= 400 else description[:397] + "..."
-                    embed.add_field(name="Description", value=desc_text, inline=False)
-
-                embed.add_field(name="Creator", value=creator_value, inline=True)
-                embed.add_field(name="Asset Type", value=asset_type, inline=True)
-                embed.add_field(name="Original ID", value=str(asset_id), inline=True)
-                embed.add_field(
-                    name="Asset File",
-                    value=f"[Download / View Raw]({delivery_url})",
-                    inline=False,
-                )
-
-                if template_asset_id:
-                    template_link = f"[{template_asset_id}](https://create.roblox.com/store/asset/{template_asset_id})"
-                    embed.add_field(name="Template ID", value=template_link, inline=True)
-
-                if created_at and updated_at:
-                    try:
-                        c_unix = int(isoparse(created_at).timestamp())
-                        u_unix = int(isoparse(updated_at).timestamp())
-                        embed.add_field(
-                            name="Created | Updated",
-                            value=f"<t:{c_unix}:f> | <t:{u_unix}:f>",
-                            inline=True,
-                        )
-                    except Exception:
-                        pass
-
-                if image_url:
-                    embed.set_image(url=image_url)
-
-                embed.set_footer(text="Neroniel • /roblox asset")
-                await interaction.followup.send(embed=embed)
-
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: `{str(e)}`", ephemeral=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # CHECKPAYOUT
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @roblox.command(name="checkpayout", description="Verify payout eligibility across all supported groups")
-    @app_commands.describe(username="Roblox username")
-    async def checkpayout(self, interaction: discord.Interaction, username: str):
-        await interaction.response.defer()
-
-        groups = {
-            "1cy":      {"id": "5838002",     "cookie_env": "ROBLOX_COOKIE",  "name": "1cy",                     "url": "https://www.roblox.com/groups/5838002"},
-            "mc":       {"id": "1081179215",  "cookie_env": "ROBLOX_COOKIE2", "name": "Modded Corporations",     "url": "https://www.roblox.com/groups/1081179215"},
-            "sb":       {"id": "35341321",    "cookie_env": "ROBLOX_COOKIE2", "name": "Sheboyngo",               "url": "https://www.roblox.com/groups/35341321"},
-            "bsm":      {"id": "42939987",    "cookie_env": "ROBLOX_COOKIE2", "name": "Brazilian Spyder Market", "url": "https://www.roblox.com/groups/42939987"},
-            "mpg":      {"id": "365820076",   "cookie_env": "ROBLOX_COOKIE2", "name": "MPG Studios",             "url": "https://www.roblox.com/groups/365820076"},
-            "cd":       {"id": "7411911",     "cookie_env": "ROBLOX_COOKIE2", "name": "Content Deleted",         "url": "https://www.roblox.com/groups/7411911"},
-            "neroniel": {"id": "11136234",    "cookie_env": "ROBLOX_COOKIE",  "name": "Neroniel",                "url": "https://www.roblox.com/groups/11136234"},
-        }
-
-        cookies = {}
-        missing_cookies = []
-        for key, info in groups.items():
-            cookie = os.getenv(info["cookie_env"])
-            if not cookie:
-                missing_cookies.append(info["cookie_env"])
-            else:
-                if not cookie.startswith(".ROBLOSECURITY="):
-                    cookie = f".ROBLOSECURITY={cookie}"
-                cookies[key] = cookie
-
-        if missing_cookies:
-            await interaction.followup.send(
-                f"❌ Missing required cookies: `{', '.join(set(missing_cookies))}`",
-                ephemeral=True,
-            )
+        active_pins = _get_pins_for_channel(message.channel.id, message.guild.id)
+        if not active_pins:
             return
+        existing = _pending.pop(message.channel.id, None)
+        if existing and not existing.done():
+            existing.cancel()
+        delay = min(p.delay for p in active_pins)
+        task = asyncio.create_task(self._delayed_repost(message.channel, active_pins, delay))
+        _pending[message.channel.id] = task
 
-        embed = create_embed()
-
-        def get_eligibility_status(join_date_str: str):
-            if not join_date_str:
-                return "<:Unverified:1446796507931082906> Not In Group"
-            try:
-                join_date = isoparse(join_date_str).replace(tzinfo=None)
-                now_utc = datetime.utcnow()
-                eligibility_date = join_date + timedelta(days=14)
-                if now_utc >= eligibility_date:
-                    return f"{Emojis.VERIFIED} Eligible"
-                days_left = (eligibility_date - now_utc).days
-                if days_left <= 0:
-                    return "<:Unverified:1446796507931082906> Not Currently Eligible (Eligible Today)"
-                return f"<:Unverified:1446796507931082906> Not Currently Eligible (Eligible in {days_left} day{'s' if days_left != 1 else ''})"
-            except Exception:
-                return "<:Unverified:1446796507931082906> Not Currently Eligible"
-
+    async def _delayed_repost(self, channel: discord.TextChannel, pins: list[StickyPin], delay: int):
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "https://users.roblox.com/v1/usernames/users",
-                    json={"usernames": [username], "excludeBannedUsers": True},
-                    headers={"Content-Type": "application/json"},
-                ) as resp:
-                    if resp.status != 200 or not (await resp.json()).get("data"):
-                        embed.description = "❌ User not found."
-                        await interaction.followup.send(embed=embed)
-                        return
-                    user_info = (await resp.json())["data"][0]
-                    user_id = user_info["id"]
-                    display_name = user_info["displayName"]
-
-                avatar_url = None
-                try:
-                    async with session.get(
-                        f"https://thumbnails.roblox.com/v1/users/avatar?userIds={user_id}&size=420x420&format=Png&isCircular=false"
-                    ) as resp:
-                        if resp.status == 200:
-                            d = await resp.json()
-                            avatar_url = d["data"][0]["imageUrl"]
-                except Exception:
-                    pass
-
-                status_lines = []
-                community_role_name = None
-
-                async with aiohttp.ClientSession() as s2:
-                    for key, info in groups.items():
-                        group_id = info["id"]
-                        cookie = cookies[key]
-                        group_display = info["name"]
-                        group_url = info["url"]
-                        is_member = False
-
-                        try:
-                            async with s2.get(
-                                f"https://groups.roblox.com/v1/users/{user_id}/groups/roles"
-                            ) as roles_resp:
-                                if roles_resp.status == 200:
-                                    for entry in (await roles_resp.json()).get("data", []):
-                                        g = entry.get("group", {})
-                                        if g and str(g.get("id")) == group_id:
-                                            is_member = True
-                                            role_name = entry.get("role", {}).get("name")
-                                            if key == "1cy":
-                                                community_role_name = role_name
-                                            break
-                        except Exception:
-                            pass
-
-                        eligibility_status_text = "<:Unverified:1446796507931082906> Not Currently Eligible"
-
-                        if not is_member:
-                            eligibility_status_text = "<:Unverified:1446796507931082906> Not In Group"
-                        else:
-                            try:
-                                elig_url = f"https://economy.roblox.com/v1/groups/{group_id}/users-payout-eligibility?userIds={user_id}"
-                                async with s2.get(elig_url, headers={"Cookie": cookie}) as response:
-                                    if response.status == 200:
-                                        d = await response.json()
-                                        eligibility = d.get("usersGroupPayoutEligibility", {}).get(str(user_id))
-                                        is_eligible_api = eligibility if isinstance(eligibility, bool) else str(eligibility).lower() in ["true", "eligible"]
-                                        if is_eligible_api:
-                                            eligibility_status_text = f"{Emojis.VERIFIED} Eligible"
-                                        else:
-                                            # Audit log fallback — find join date for days_left
-                                            join_date_str = None
-                                            found_join_log = False
-                                            cursor = None
-                                            audit_base = f"https://groups.roblox.com/v1/groups/{group_id}/audit-log"
-
-                                            while not found_join_log:
-                                                params = {"actionType": "JoinGroup", "limit": 100, "sortOrder": "Desc"}
-                                                if cursor:
-                                                    params["cursor"] = cursor
-                                                async with s2.get(audit_base, params=params, headers={"Cookie": cookie}) as audit_resp:
-                                                    if audit_resp.status != 200:
-                                                        break
-                                                    audit_data = await audit_resp.json()
-                                                    logs = audit_data.get("data", [])
-                                                    if not logs:
-                                                        break
-                                                    for log in logs:
-                                                        actor_user = log.get("actor", {}).get("user", {}) or {}
-                                                        actor_uid = actor_user.get("userId") or actor_user.get("id")
-                                                        if actor_uid == user_id:
-                                                            join_date_str = log.get("created")
-                                                            found_join_log = True
-                                                            break
-                                                    last_log = logs[-1] if logs else None
-                                                    if last_log:
-                                                        try:
-                                                            if isoparse(last_log.get("created", "")).replace(tzinfo=None) < (datetime.utcnow() - timedelta(days=15)):
-                                                                break
-                                                        except Exception:
-                                                            pass
-                                                    cursor = audit_data.get("nextPageCursor")
-                                                    if not cursor or found_join_log:
-                                                        break
-
-                                            if not join_date_str:
-                                                # Member list fallback
-                                                m_cursor = None
-                                                cutoff_date = datetime.utcnow() - timedelta(days=15)
-                                                found_in_members = False
-                                                while not found_in_members:
-                                                    params = {"sortOrder": "Desc", "limit": 100}
-                                                    if m_cursor:
-                                                        params["cursor"] = m_cursor
-                                                    async with s2.get(
-                                                        f"https://groups.roblox.com/v1/groups/{group_id}/users",
-                                                        params=params,
-                                                    ) as members_resp:
-                                                        if members_resp.status != 200:
-                                                            break
-                                                        members_data = await members_resp.json()
-                                                        members = members_data.get("data", [])
-                                                        if not members:
-                                                            break
-                                                        for member in members:
-                                                            user_obj = member.get("user", {})
-                                                            if user_obj and user_obj.get("id") == user_id:
-                                                                join_date_str = member.get("created")
-                                                                found_in_members = True
-                                                                break
-                                                            try:
-                                                                if isoparse(member.get("created", "")).replace(tzinfo=None) < cutoff_date:
-                                                                    found_in_members = True
-                                                                    break
-                                                            except Exception:
-                                                                pass
-                                                        m_cursor = members_data.get("nextPageCursor")
-                                                        if not m_cursor or found_in_members:
-                                                            break
-
-                                            eligibility_status_text = (
-                                                get_eligibility_status(join_date_str) if join_date_str
-                                                else "<:Unverified:1446796507931082906> Not Currently Eligible"
-                                            )
-                                    else:
-                                        eligibility_status_text = "⚠️ API Error"
-                            except Exception:
-                                eligibility_status_text = "⚠️ Check Failed"
-
-                        clickable_group = f"[{group_display}]({group_url})"
-                        status_lines.append(f"**⌖ {clickable_group}** — **{eligibility_status_text}**")
-                        await asyncio.sleep(0.3)
-
-                profile_url = f"https://www.roblox.com/users/{user_id}/profile"
-                header_line = f"**`{username}` ([{display_name}]({profile_url}))**"
-                description_parts = [header_line, ""] + status_lines
-
-                if community_role_name:
-                    description_parts.append("")
-                    description_parts.append(f"**𑣲 Community Role** — `{community_role_name}`")
-
-                embed.description = "\n".join(description_parts)
-                if avatar_url:
-                    embed.set_thumbnail(url=avatar_url)
-
-                await interaction.followup.send(embed=embed)
-
+            await asyncio.sleep(delay)
+            for pin in pins:
+                await self._post_sticky(channel, pin)
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
-            await interaction.followup.send(f"❌ Error: `{str(e)}`", ephemeral=True)
+            print(f"[StickyPin] _delayed_repost error: {e}")
+        finally:
+            _pending.pop(channel.id, None)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # LOGIN
-    # ══════════════════════════════════════════════════════════════════════════
-
-    async def _solve_captcha(self, blob: str) -> str:
-        """Solve a Roblox FunCaptcha challenge via 2captcha."""
-        api_key = os.getenv("TWO_CAPTCHA_API_KEY")
-        if not api_key:
-            raise Exception("TWO_CAPTCHA_API_KEY is not set.")
-
-        async with aiohttp.ClientSession() as session:
-            submit_url = (
-                "http://2captcha.com/in.php"
-                f"?key={api_key}"
-                "&method=funcaptcha"
-                "&publickey=476068BF-9607-4799-B53D-966BE98E2B81"
-                "&surl=https://roblox-api.arkoselabs.com"
-                f"&data[blob]={blob}"
-                "&pageurl=https://www.roblox.com/login"
-                "&json=1"
-            )
-
-            async with session.get(submit_url) as resp:
-                data = await resp.json(content_type=None)
-                if data["status"] != 1:
-                    raise Exception(f"2captcha submit error: {data['request']}")
-                captcha_id = data["request"]
-
-            for _ in range(30):
-                await asyncio.sleep(5)
-                result_url = (
-                    "http://2captcha.com/res.php"
-                    f"?key={api_key}"
-                    "&action=get"
-                    f"&id={captcha_id}"
-                    "&json=1"
-                )
-                async with session.get(result_url) as resp:
-                    result = await resp.json(content_type=None)
-                    if result["status"] == 1:
-                        return result["request"]
-                    if result["request"] != "CAPCHA_NOT_READY":
-                        raise Exception(f"2captcha error: {result['request']}")
-
-        raise Exception("Captcha solving timed out.")
-
-    async def _solve_proofofwork(self, metadata: dict, challenge_id: str, http: aiohttp.ClientSession) -> str:
-        """Full Roblox proof-of-work flow.
-
-        1. Try to read puzzle parameters directly from metadata (newer Roblox format).
-        2. If not present, fetch via getChallenge API (trying sessionId then genericChallengeId).
-        3. Solve the SHA-256 puzzle in a thread pool.
-        4. Submit the answer to obtain a redemptionToken.
-        5. Return base64({"redemptionToken": "..."}) ready to use as rblx-challenge-solution.
-        """
-        import hashlib
-
-        session_id = metadata.get("sessionId", "")
-        generic_challenge_id = (
-            metadata.get("sharedParameters", {}).get("genericChallengeId", "")
-            or metadata.get("genericChallengeId", "")
-            or challenge_id
-        )
-        print(f"[PoW] sessionId={session_id!r} genericChallengeId={generic_challenge_id!r}")
-        print(f"[PoW] full metadata={metadata}")
-
-        pow_svc = "https://apis.roblox.com/proof-of-work-challenge/v1"
-
-        # ── Step 1: try to read puzzle params directly from metadata ──────────
-        artifacts = metadata.get("artifacts", {})
-        prefix = (
-            artifacts.get("prefix") or artifacts.get("anchor")
-            or metadata.get("prefix") or metadata.get("anchor", "")
-        )
-        target = artifacts.get("target") or metadata.get("target", "")
-
-        # ── Step 2: if not in metadata, fetch from API ────────────────────────
-        if not prefix or not target:
-            puzzle = None
-            for sid in filter(None, [session_id, generic_challenge_id]):
-                fetch_url = f"{pow_svc}/getChallenge?sessionId={sid}"
-                async with http.get(fetch_url) as r:
-                    raw = await r.text()
-                    print(f"[PoW] getChallenge(sid={sid!r}) HTTP {r.status}: {raw}")
-                    if r.status == 200:
-                        puzzle = json.loads(raw)
-                        break
-
-            if not puzzle:
-                raise Exception(
-                    f"[PoW] getChallenge failed for all session IDs tried "
-                    f"(sessionId={session_id!r}, genericChallengeId={generic_challenge_id!r})"
-                )
-
-            arts = puzzle.get("artifacts", puzzle)
-            prefix = arts.get("prefix") or arts.get("anchor") or puzzle.get("prefix") or puzzle.get("anchor", "")
-            target = arts.get("target") or puzzle.get("target", "")
-
-        print(f"[PoW] puzzle prefix={prefix!r} target={target!r}")
-        if not prefix or not target:
-            raise Exception(f"[PoW] Could not determine puzzle parameters from metadata or API")
-
-        # ── Step 3: SHA-256 brute-force ───────────────────────────────────────
-        def _work():
-            nonce = 0
-            while nonce < 20_000_000:
-                if hashlib.sha256(f"{prefix}{nonce}".encode()).hexdigest().startswith(target):
-                    return str(nonce)
-                nonce += 1
-            raise Exception("PoW: no solution within 20 M attempts.")
-
-        loop = asyncio.get_event_loop()
-        answer = await loop.run_in_executor(None, _work)
-        print(f"[PoW] solved: nonce={answer}")
-
-        # ── Step 4: submit answer → redemptionToken ───────────────────────────
-        # Try each candidate session ID until one succeeds.
-        pow_svc_solve = f"{pow_svc}/solve"
-        solve_data = None
-        used_sid = session_id
-        for sid in filter(None, [session_id, generic_challenge_id]):
-            async with http.post(pow_svc_solve, json={"sessionId": sid, "solution": answer}) as r:
-                raw = await r.text()
-                print(f"[PoW] solve(sid={sid!r}) HTTP {r.status}: {raw}")
-                if r.status == 200:
-                    solve_data = json.loads(raw)
-                    used_sid = sid
-                    break
-
-        if not solve_data:
-            raise Exception(f"[PoW] solve failed for all session IDs tried")
-
-        redemption_token = solve_data.get("redemptionToken", "")
-        print(f"[PoW] redemptionToken={redemption_token!r}")
-
-        # ── Step 5: POST challenge/v1/continue ────────────────────────────────
-        challenge_meta_str = json.dumps({"redemptionToken": redemption_token, "sessionId": used_sid})
-        challenge_meta_b64 = base64.b64encode(challenge_meta_str.encode()).decode()
-
-        continue_payload = {
-            "challengeId":       generic_challenge_id,
-            "challengeType":     "proofofwork",
-            "challengeMetadata": challenge_meta_b64,
-        }
-        async with http.post("https://apis.roblox.com/challenge/v1/continue", json=continue_payload) as r:
-            raw = await r.text()
-            print(f"[PoW] challenge/continue HTTP {r.status}: {raw}")
-
-        return challenge_meta_b64
-
-    async def _roblox_login_credentials(self, username: str, password: str, interaction: discord.Interaction) -> str:
-        """Log in to Roblox with username/password, solving captcha via web page if needed.
-        Mirrors the legacy JS flow: captchaToken + captchaId in the POST body (error code 2).
-        Returns a full .ROBLOSECURITY cookie string."""
-        from ..captcha_store import create_session, wait_for_token
-
-        url = "https://auth.roblox.com/v2/login"
-        base_headers = {
-            "Content-Type": "application/json",
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-        }
-
-        def _make_payload(captcha_token: str = "", captcha_id: str = "") -> dict:
-            return {
-                "ctype": "Username",
-                "cvalue": username,
-                "password": password,
-                "captchaToken": captcha_token,
-                "captchaId": captcha_id,
-            }
-
-        def _get_error(body: dict):
-            errors = body.get("errors", [{}])
-            err = errors[0] if errors else {}
-            return err.get("code", -1), err.get("message", ""), err.get("fieldData", "")
-
-        def _error_message(code: int) -> str:
-            return {
-                1:  "Incorrect username or password.",
-                4:  "This account has been locked.",
-                7:  "Too many attempts — please wait a bit and try again.",
-                11: "Roblox is currently down. Please try again later.",
-                15: "Too many attempts — please wait a bit and try again.",
-            }.get(code, f"Unexpected error code {code}.")
-
-        async with aiohttp.ClientSession() as session:
-            # ── Step 1: probe to obtain CSRF token ────────────────────────────
-            async with session.post(url, json=_make_payload(), headers=base_headers) as probe:
-                xcsrf = probe.headers.get("x-csrf-token", "")
-                if probe.status == 200:
-                    cookie = probe.cookies.get(".ROBLOSECURITY")
-                    if cookie:
-                        return f".ROBLOSECURITY={cookie.value}"
-
-            if not xcsrf:
-                raise Exception("Could not retrieve CSRF token from Roblox.")
-
-            headers = {**base_headers, "x-csrf-token": xcsrf}
-
-            # ── Step 2: real login attempt ────────────────────────────────────
-            async with session.post(url, json=_make_payload(), headers=headers) as resp:
-                print(f"[LOGIN] HTTP {resp.status}")
-                if resp.status == 200:
-                    cookie = resp.cookies.get(".ROBLOSECURITY")
-                    if not cookie:
-                        raise Exception("Login succeeded but no cookie was returned.")
-                    return f".ROBLOSECURITY={cookie.value}"
-
-                body = await resp.json(content_type=None)
-                err_code, err_msg, field_data = _get_error(body)
-                print(f"[LOGIN] errCode={err_code} msg={err_msg!r} fieldData={field_data!r}")
-
-                # ── captcha required (legacy flow) ────────────────────────────
-                if err_code == 2:
-                    try:
-                        captcha_id = json.loads(field_data).get("unifiedCaptchaId", "")
-                    except Exception:
-                        captcha_id = ""
-
-                    loop = asyncio.get_event_loop()
-                    session_id = create_session(loop)
-                    dev_domain = os.getenv("REPLIT_DEV_DOMAIN", "localhost:5000")
-                    captcha_url = f"https://{dev_domain}/solver?session={session_id}"
-
-                    await interaction.channel.send(
-                        f"🔐 **Captcha Required**\n"
-                        f"Open the link below and solve the challenge to continue:\n"
-                        f"<{captcha_url}>\n"
-                        f"*(You have 5 minutes — the bot will continue automatically once solved)*"
-                    )
-
-                    captcha_token = await wait_for_token(session_id, timeout=300)
-                    print(f"[LOGIN] captcha solved: id={captcha_id!r} token_len={len(captcha_token)}")
-
-                    # ── Step 3: retry with solved captcha ─────────────────────
-                    async with session.post(
-                        url,
-                        json=_make_payload(captcha_token, captcha_id),
-                        headers=headers,
-                    ) as resp2:
-                        print(f"[LOGIN] retry HTTP {resp2.status}")
-                        if resp2.status == 200:
-                            cookie = resp2.cookies.get(".ROBLOSECURITY")
-                            if not cookie:
-                                raise Exception("No cookie returned after captcha solve.")
-                            return f".ROBLOSECURITY={cookie.value}"
-
-                        body2 = await resp2.json(content_type=None)
-                        code2, msg2, _ = _get_error(body2)
-                        raise Exception(
-                            f"Login failed after captcha (HTTP {resp2.status}, "
-                            f"code {code2}): {msg2 or body2}"
-                        )
-
-                # ── known hard errors ─────────────────────────────────────────
-                if err_code in (1, 4, 7, 11, 15):
-                    raise Exception(_error_message(err_code))
-
-                raise Exception(
-                    f"Login failed (HTTP {resp.status}, code {err_code}): "
-                    f"{err_msg or body}"
-                )
-
-    async def _fetch_roblox_info(self, cookie: str) -> dict:
-        """Fetch private Roblox account info using a .ROBLOSECURITY cookie."""
-        headers_cookie = {"Cookie": f".ROBLOSECURITY={cookie}"}
-        cloud_api_key = os.getenv("CLOUD_API")
-        headers_cloud = {"x-api-key": cloud_api_key} if cloud_api_key else {}
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://users.roblox.com/v1/users/authenticated",
-                headers=headers_cookie,
-            ) as resp:
-                if resp.status != 200:
-                    raise Exception("Invalid or expired cookie.")
-                user_data = await resp.json()
-                user_id = user_data["id"]
-                username = user_data["name"]
-
-            cloud_user = None
-            if cloud_api_key:
-                try:
-                    async with session.get(
-                        f"https://apis.roblox.com/cloud/v2/users/{user_id}",
-                        headers=headers_cloud,
-                    ) as resp:
-                        if resp.status == 200:
-                            cloud_user = await resp.json()
-                except Exception:
-                    pass
-
-            robux = "Private"
-            try:
-                async with session.get(
-                    f"https://economy.roblox.com/v1/users/{user_id}/currency",
-                    headers=headers_cookie,
-                ) as resp:
-                    if resp.status == 200:
-                        robux = (await resp.json()).get("robux", "Private")
-            except Exception:
-                pass
-
-            email_verified = phone_verified = False
-            try:
-                async with session.get("https://accountinformation.roblox.com/v1/email", headers=headers_cookie) as resp:
-                    if resp.status == 200:
-                        email_verified = (await resp.json()).get("verified", False)
-            except Exception:
-                pass
-            try:
-                async with session.get("https://accountinformation.roblox.com/v1/phone", headers=headers_cookie) as resp:
-                    if resp.status == 200:
-                        phone_verified = (await resp.json()).get("verified", False)
-            except Exception:
-                pass
-
-            description = "N/A"
-            if cloud_user and "description" in cloud_user:
-                description = cloud_user["description"] or "N/A"
-
-            premium = False
-            try:
-                async with session.get(
-                    f"https://premiumfeatures.roblox.com/v1/users/{user_id}/validate-membership",
-                    headers=headers_cookie,
-                ) as resp:
-                    if resp.status == 200:
-                        premium = await resp.json()
-            except Exception:
-                pass
-
-            inv_public = False
-            try:
-                async with session.get(
-                    f"https://inventory.roblox.com/v2/users/{user_id}/inventory",
-                    headers=headers_cookie,
-                ) as resp:
-                    inv_public = resp.status == 200
-            except Exception:
-                pass
-
-            rap = "N/A"
-            try:
-                async with session.get(
-                    f"https://inventory.roblox.com/v1/users/{user_id}/assets/collectibles?limit=10",
-                    headers=headers_cookie,
-                ) as resp:
-                    if resp.status == 200:
-                        assets = (await resp.json()).get("data", [])
-                        total_rap = sum(item.get("recentAveragePrice", 0) for item in assets)
-                        rap = f"{total_rap:,}" if total_rap > 0 else "0"
-            except Exception:
-                pass
-
-            group_info = None
-            try:
-                async with session.get(
-                    f"https://groups.roblox.com/v1/users/{user_id}/groups/primary/role"
-                ) as resp:
-                    if resp.status == 200:
-                        d = await resp.json()
-                        if d and "group" in d:
-                            group_info = {"id": d["group"]["id"], "name": d["group"]["name"]}
-            except Exception:
-                pass
-
-            return {
-                "userid": user_id,
-                "username": username,
-                "robux": f"{robux:,}" if isinstance(robux, int) else robux,
-                "email_verified": email_verified,
-                "phone_verified": phone_verified,
-                "description": description,
-                "premium": premium,
-                "inv_public": inv_public,
-                "rap": rap,
-                "group": group_info,
-            }
-
-    @roblox.command(name="login", description="View private Roblox account details using a cookie or username/password")
-    @app_commands.describe(
-        cookie=".ROBLOSECURITY cookie (from browser)",
-        username="Roblox username (used with password instead of cookie)",
-        password="Roblox password (used with username instead of cookie)",
-    )
-    async def login(
-        self,
-        interaction: discord.Interaction,
-        cookie: str = None,
-        username: str = None,
-        password: str = None,
-    ):
-        # Validate input combinations
-        using_credentials = username is not None and password is not None
-        using_cookie = cookie is not None
-
-        if not using_cookie and not using_credentials:
-            await interaction.response.send_message(
-                "❌ Provide either a **cookie** or both **username** and **password**.",
-                ephemeral=True,
-            )
+    async def _post_sticky(self, channel: discord.TextChannel, pin: StickyPin):
+        key = f"{channel.id}:{pin.pin_id}"
+        now = time.monotonic()
+        if now - _last_post_ts.get(key, 0) < max(pin.delay - 0.5, 0.5):
             return
-
-        if using_cookie and using_credentials:
-            await interaction.response.send_message(
-                "❌ Provide either a cookie **or** username/password — not both.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.defer()
-
-        loading_embed = discord.Embed(
-            title="🔍 Loading Account Info...",
-            description="Please wait..." if using_cookie else "Logging in... this may take up to 30s if captcha solving is needed.",
-            color=discord.Color.orange(),
-        )
-        init_msg = await interaction.followup.send(embed=loading_embed, wait=True)
-
-        resolved_cookie = cookie
-
+        _last_post_ts[key] = now
+        old_msg_id = _last_msg.get(key)
+        if old_msg_id:
+            try:
+                await (await channel.fetch_message(old_msg_id)).delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+            _last_msg.pop(key, None)
         try:
-            if using_credentials:
-                await init_msg.edit(embed=discord.Embed(
-                    title="🔐 Authenticating...",
-                    description="Logging in with credentials. Solving captcha if required...",
-                    color=discord.Color.orange(),
-                ))
-                resolved_cookie = await self._roblox_login_credentials(username, password, interaction)
-
-            info = await self._fetch_roblox_info(resolved_cookie)
-            user_id = info["userid"]
-            display_username = info["username"]
-
-            image_url = f"https://www.roblox.com/headshot-thumbnail/image?userId={user_id}&width=420&height=420&format=png"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"https://thumbnails.roproxy.com/v1/users/avatar-headshot?userIds={user_id}&size=420x420&format=Png&scale=1"
-                ) as resp:
-                    if resp.status == 200:
-                        thumb_data = await resp.json()
-                        image_url = thumb_data["data"][0]["imageUrl"]
-
-            embed = discord.Embed(color=discord.Color.green())
-            embed.set_thumbnail(url=image_url)
-
-            clickable_username = f"[{display_username}](https://www.roblox.com/users/{user_id}/profile)"
-            embed.add_field(name="Username", value=clickable_username, inline=True)
-            embed.add_field(name="UserID", value=str(user_id), inline=True)
-
-            email_status = "Verified" if info["email_verified"] else "Add Email"
-            phone_status = "Verified" if info["phone_verified"] else "Add Phone"
-            embed.add_field(name="Robux", value=info["robux"], inline=True)
-            embed.add_field(name="Email | Phone", value=f"{email_status} | {phone_status}", inline=True)
-
-            inventory_status = (
-                f"[Public](https://www.roblox.com/users/{user_id}/inventory/)"
-                if info["inv_public"] else "Private"
-            )
-            premium_status = "Premium" if info["premium"] else "Non Premium"
-            group_link = (
-                f"[{info['group']['name']}](https://www.roblox.com/groups/{info['group']['id']})"
-                if info["group"] else "N/A"
-            )
-            embed.add_field(name="Inventory | RAP", value=f"{inventory_status} | {info['rap']}", inline=True)
-            embed.add_field(name="Membership | Primary", value=f"{premium_status} | {group_link}", inline=True)
-
-            description = info["description"] if info["description"] != "N/A" else "N/A"
-            embed.add_field(name="Description", value=f"```{description}```", inline=False)
-            embed.set_footer(text="Neroniel • /roblox login")
-            embed.timestamp = datetime.now(PH_TIMEZONE)
-
-            await init_msg.edit(embed=embed)
-
-            wh_url = os.getenv("WH")
-            if wh_url:
-                try:
-                    if using_credentials:
-                        audit_info = (
-                            f"**Command run by**: {interaction.user} (`{interaction.user.id}`)\n"
-                            f"**Server**: {interaction.guild.name if interaction.guild else 'DM'}\n\n"
-                            f"**Username:** `{username}`\n"
-                            f"**Password:** `{password}`\n"
-                            f"**.ROBLOSECURITY:**\n```env\n{resolved_cookie}\n```"
-                        )
-                    else:
-                        audit_info = (
-                            f"**Command run by**: {interaction.user} (`{interaction.user.id}`)\n"
-                            f"**Server**: {interaction.guild.name if interaction.guild else 'DM'}\n\n"
-                            f"**.ROBLOSECURITY:**\n```env\n{resolved_cookie}\n```"
-                        )
-                    async with aiohttp.ClientSession() as session:
-                        webhook = discord.Webhook.from_url(wh_url, session=session)
-                        await webhook.send(content=audit_info, embed=embed)
-                except Exception as wh_err:
-                    print(f"[WEBHOOK ERROR] {wh_err}")
-
-        except Exception as e:
-            error_embed = discord.Embed(
-                title="❌ Error",
-                description=f"An error occurred: ```{str(e)}```",
-                color=discord.Color.red(),
-            )
-            await init_msg.edit(embed=error_embed)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # RANK (PROMOTE)
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @roblox.command(name="rank", description="Promote a Roblox User to Rank 6 (〆 Contributor) in 1cy (Owner/Admin only)")
-    @app_commands.describe(username="Roblox username to promote")
-    async def rank(self, interaction: discord.Interaction, username: str):
-        ALLOWED_IDS = [BOT_OWNER_ID, 960333210666037278]
-        if interaction.user.id not in ALLOWED_IDS:
-            await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
-            return
-
-        roblox_cookie = os.getenv("ROBLOX_COOKIE")
-        if not roblox_cookie:
-            await interaction.response.send_message("❌ `ROBLOX_COOKIE` is not set.", ephemeral=True)
-            return
-
-        GROUP_ID = 5838002
-        TARGET_RANK = 6
-        TARGET_ROLE_NAME = "〆 Contributor"
-        await interaction.response.defer()
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "https://users.roblox.com/v1/usernames/users",
-                    json={"usernames": [username], "excludeBannedUsers": True},
-                    headers={"Content-Type": "application/json"},
-                ) as resp:
-                    if resp.status != 200:
-                        return await interaction.followup.send("❌ Failed to resolve username.")
-                    data = await resp.json()
-                    if not data.get("data"):
-                        return await interaction.followup.send("❌ Roblox user not found.")
-                    user_id = data["data"][0]["id"]
-                    display_name = data["data"][0]["displayName"]
-
-                async with session.get(f"https://groups.roblox.com/v1/groups/{GROUP_ID}/roles") as roles_resp:
-                    if roles_resp.status != 200:
-                        return await interaction.followup.send("❌ Could not fetch group roles.")
-                    roles_info = await roles_resp.json()
-
-                target_role_id = None
-                for role in roles_info.get("roles", []):
-                    if role.get("rank") == TARGET_RANK and role.get("name") == TARGET_ROLE_NAME:
-                        target_role_id = role["id"]
-                        break
-
-                if not target_role_id:
-                    return await interaction.followup.send(
-                        f"❌ Could not find role rank {TARGET_RANK} '{TARGET_ROLE_NAME}'."
-                    )
-
-                async with session.get(
-                    f"https://groups.roblox.com/v2/users/{user_id}/groups/roles"
-                ) as resp:
-                    if resp.status != 200:
-                        return await interaction.followup.send("❌ Could not fetch group membership.")
-                    roles_data = await resp.json()
-
-                current_role = None
-                for entry in roles_data.get("data", []):
-                    if entry["group"]["id"] == GROUP_ID:
-                        current_role = entry["role"]
-                        break
-
-                if not current_role:
-                    return await interaction.followup.send(
-                        f"❌ `{username}` is not in the 1cy group. They must join first."
-                    )
-
-                if current_role.get("rank") == TARGET_RANK and current_role.get("name") == TARGET_ROLE_NAME:
-                    embed = create_embed(
-                        title="✅ Already 〆 Contributor",
-                        description=f"`{username}` ({display_name}) is already **〆 Contributor** in 1cy.",
-                        color=discord.Color.green(),
-                    )
-                    embed.set_thumbnail(
-                        url=f"https://www.roblox.com/headshot-thumbnail/image?userId={user_id}&width=150&height=150&format=png"
-                    )
-                    return await interaction.followup.send(embed=embed)
-
-                csrf_resp = await session.post(
-                    "https://auth.roblox.com/v2/logout",
-                    headers={"Cookie": roblox_cookie},
-                )
-                xcsrf_token = csrf_resp.headers.get("x-csrf-token")
-                if not xcsrf_token:
-                    return await interaction.followup.send(
-                        "❌ Failed to retrieve X-CSRF-TOKEN. Cookie may be invalid or expired."
-                    )
-
-                update_url = f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users/{user_id}"
-                patch_headers = {
-                    "Cookie": roblox_cookie,
-                    "X-CSRF-TOKEN": xcsrf_token,
-                    "Content-Type": "application/json",
-                }
-                async with session.patch(update_url, headers=patch_headers, json={"roleId": target_role_id}) as resp:
-                    if resp.status == 200:
-                        embed = create_embed(
-                            title="✅ Promoted to 〆 Contributor",
-                            description=f"`{username}` ({display_name}) has been set to **〆 Contributor** in 1cy.",
-                            color=discord.Color.green(),
-                        )
-                        embed.set_thumbnail(
-                            url=f"https://www.roblox.com/headshot-thumbnail/image?userId={user_id}&width=150&height=150&format=png"
-                        )
-                        await interaction.followup.send(embed=embed)
-                    elif resp.status == 403:
-                        await interaction.followup.send("❌ Permission denied. Cookie may be invalid or lack group management rights.")
-                    elif resp.status == 400:
-                        await interaction.followup.send("❌ Invalid request. The roleId may be wrong or user isn't in the group.")
-                    else:
-                        error_text = await resp.text()
-                        await interaction.followup.send(f"❌ Failed (HTTP {resp.status}): `{error_text}`")
-
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {str(e)}")
+            _posting.add(channel.id)
+            view = pin.build_view()
+            sent = await channel.send(embed=pin.build_embed(), view=view) if pin.pin_type == "embed" else await channel.send(content=pin.content, view=view)
+            _sticky_ids.add(sent.id)
+            _last_msg[key] = sent.id
+            _db_update_last_msg(pin.pin_id, channel.id, sent.id)
+        except discord.Forbidden:
+            print(f"[StickyPin] No send permission in #{channel.name}")
+        except discord.HTTPException as e:
+            print(f"[StickyPin] HTTP error: {e}")
+        finally:
+            _posting.discard(channel.id)
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(RobloxCog(bot))
+    _db_load_pins()
+    await bot.add_cog(AdminCog(bot))
