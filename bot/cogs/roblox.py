@@ -341,33 +341,48 @@ class RobloxCog(commands.Cog):
                     all_data["account_balance2"] = 0
                     all_visible["account_balance2"] = False
 
-                # Build embed
         def fmt(key):
             return f"{Emojis.ROBUX} {all_data.get(key, 0):,}" if all_visible.get(key) else "||HIDDEN||"
 
-        lines = []
-
-        # ── Group Payout section ──
+        # ── Group Payout lines ──
+        group_lines = []
         for key, cfg in ROBLOX_GROUPS.items():
-            lines.append(f"**⌖ __{cfg['label']}__**")
-            lines.append(f"{fmt(f'{key}_funds')} | {fmt(f'{key}_pending')}")
+            group_lines.append(f"**⌖ __{cfg['label']}__**")
+            group_lines.append(f"{fmt(f'{key}_funds')} | {fmt(f'{key}_pending')}")
 
-        lines.append("")
+        # ── Personal Account lines ── always shown, ||HIDDEN|| if cookie invalid
+        account_lines = [
+            f"**⌖ __Neroniel__ Account Balance**",
+            fmt("account_balance"),
+            fmt("account_balance2"),
+        ]
 
-        # ── Personal Accounts section ──
-        lines.append("**⌖ __Neroniel__ Account Balance**")
-        if all_visible.get("account_balance"):
-            lines.append(fmt("account_balance"))
-        if all_visible.get("account_balance2"):
-            lines.append(fmt("account_balance2"))
+        now_unix = int(datetime.now(PH_TIMEZONE).timestamp())
+        bot_avatar = interaction.client.user.avatar.url if interaction.client.user.avatar else None
 
-        embed = create_embed(description="\n".join(lines))
-        
-        # Add bot avatar as thumbnail
-        if interaction.client.user.avatar:
-            embed.set_thumbnail(url=interaction.client.user.avatar.url)
-        
-        await interaction.followup.send(embed=embed)
+        thumbnail = discord.ui.Thumbnail(bot_avatar) if bot_avatar else discord.ui.Thumbnail(
+            "https://cdn.discordapp.com/embed/avatars/0.png"
+        )
+
+        container = discord.ui.Container(
+            discord.ui.Section(
+                discord.ui.TextDisplay("## Robux Stocks Information"),
+                discord.ui.TextDisplay("### Community Funds | Pending Robux"),
+                accessory=thumbnail,
+            ),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("### Group Payout"),
+            discord.ui.TextDisplay("\n".join(group_lines)),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("### Plus/Gamepass/In-Game Gift"),
+            discord.ui.TextDisplay(f"**⌖ __Neroniel__ Account Balance**\n{fmt('account_balance')}\n{fmt('account_balance2')}"),
+            discord.ui.Separator(visible=False),
+            discord.ui.TextDisplay(f"-# Neroniel • <t:{now_unix}:f>"),
+        )
+
+        view = discord.ui.LayoutView()
+        view.add_item(container)
+        await interaction.followup.send(view=view)
 
     # ══════════════════════════════════════════════════════════════════════════
     # GAMEPASS
