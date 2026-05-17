@@ -277,18 +277,17 @@ class RobloxCog(commands.Cog):
                         res = await r.json()
                         data[f"{key}_funds"] = res.get("robux", 0)
                         visible[f"{key}_funds"] = True
-                        # Default pending to visible (0) when cookie is valid
-                        visible[f"{key}_pending"] = True
 
                 await asyncio.sleep(0.3)
 
                 async with session.get(
-                    f"https://economy.roblox.com/v2/groups/{group_id}/transactions/totals?timeFrame=Month&transactionType=summary",
+                    f"https://apis.roblox.com/transaction-records/v1/groups/{group_id}/revenue/summary/day",
                     headers=headers,
                 ) as r:
                     if r.status == 200:
                         res = await r.json()
-                        data[f"{key}_pending"] = res.get("pendingRobuxTotal", 0)
+                        data[f"{key}_pending"] = res.get("pendingRobux", 0)
+                        visible[f"{key}_pending"] = True
 
             except Exception as e:
                 print(f"[STOCKS] Error fetching {key}: {e}")
@@ -321,11 +320,7 @@ class RobloxCog(commands.Cog):
                             res = await r.json()
                             all_data["account_balance"] = res.get("robux", 0)
                             all_visible["account_balance"] = True
-                            # Default pending to visible (0) when cookie is valid
-                            all_data["account_pending"] = 0
-                            all_visible["account_pending"] = True
                 except Exception:
-                    all_data["account_balance"] = 0
                     all_visible["account_balance"] = False
 
                 await asyncio.sleep(0.3)
@@ -338,6 +333,7 @@ class RobloxCog(commands.Cog):
                         if r.status == 200:
                             res = await r.json()
                             all_data["account_pending"] = res.get("pendingRobuxTotal", 0)
+                            all_visible["account_pending"] = True
                 except Exception as e:
                     print(f"[STOCKS] account1 pending error: {e}")
 
@@ -356,11 +352,7 @@ class RobloxCog(commands.Cog):
                             res = await r.json()
                             all_data["account_balance2"] = res.get("robux", 0)
                             all_visible["account_balance2"] = True
-                            # Default pending to visible (0) when cookie is valid
-                            all_data["account_pending2"] = 0
-                            all_visible["account_pending2"] = True
                 except Exception:
-                    all_data["account_balance2"] = 0
                     all_visible["account_balance2"] = False
 
                 await asyncio.sleep(0.3)
@@ -373,6 +365,7 @@ class RobloxCog(commands.Cog):
                         if r.status == 200:
                             res = await r.json()
                             all_data["account_pending2"] = res.get("pendingRobuxTotal", 0)
+                            all_visible["account_pending2"] = True
                 except Exception as e:
                     print(f"[STOCKS] account2 pending error: {e}")
 
@@ -1032,7 +1025,10 @@ class RobloxCog(commands.Cog):
                 status_lines = []
                 community_role_name = None
 
-                async with aiohttp.ClientSession() as s2:
+                _headers_base = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+                }
+                async with aiohttp.ClientSession(headers=_headers_base) as s2:
                     for key, info in groups.items():
                         group_id = info["id"]
                         cookie = cookies[key]
