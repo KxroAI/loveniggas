@@ -259,15 +259,15 @@ class RobloxCog(commands.Cog):
     @roblox.command(name="stocks", description="Check Robux balances across all managed groups")
     async def stocks(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        
+
         all_data = {}
         all_visible = {}
-        
+
         async def fetch_group_data(session, group_id, cookie, key):
             data = {f"{key}_funds": 0, f"{key}_pending": 0}
             visible = {f"{key}_funds": False, f"{key}_pending": False}
             headers = {"Cookie": cookie}
-            
+
             try:
                 async with session.get(
                     f"https://economy.roblox.com/v1/groups/{group_id}/currency",
@@ -277,9 +277,9 @@ class RobloxCog(commands.Cog):
                         res = await r.json()
                         data[f"{key}_funds"] = res.get("robux", 0)
                         visible[f"{key}_funds"] = True
-                
+
                 await asyncio.sleep(0.3)
-                
+
                 async with session.get(
                     f"https://apis.roblox.com/transaction-records/v1/groups/{group_id}/revenue/summary/day",
                     headers=headers,
@@ -288,32 +288,33 @@ class RobloxCog(commands.Cog):
                         res = await r.json()
                         data[f"{key}_pending"] = res.get("pendingRobux", 0)
                         visible[f"{key}_pending"] = True
-                        
+
             except Exception as e:
                 print(f"[STOCKS] Error fetching {key}: {e}")
-            
+
             return data, visible
-        
+
         async with aiohttp.ClientSession() as session:
             for key, cfg in ROBLOX_GROUPS.items():
                 cookie = os.getenv(cfg["cookie_env"])
                 if not cookie:
                     continue
-                
+
                 data, visible = await fetch_group_data(session, cfg["id"], cookie, key)
                 all_data.update(data)
                 all_visible.update(visible)
                 await asyncio.sleep(0.3)
-            
+
             # Fetch personal account 1
             roblox_stocks_cookie = os.getenv("ROBLOX_STOCKS")
             roblox_user_id = os.getenv("ROBLOX_STOCKS_ID")
 
             if roblox_stocks_cookie and roblox_user_id:
+                headers1 = {"Cookie": roblox_stocks_cookie}
                 try:
                     async with session.get(
                         f"https://economy.roblox.com/v1/users/{roblox_user_id}/currency",
-                        headers={"Cookie": roblox_stocks_cookie},
+                        headers=headers1,
                     ) as r:
                         if r.status == 200:
                             res = await r.json()
@@ -323,15 +324,31 @@ class RobloxCog(commands.Cog):
                     all_data["account_balance"] = 0
                     all_visible["account_balance"] = False
 
+                await asyncio.sleep(0.3)
+
+                try:
+                    async with session.get(
+                        f"https://apis.roblox.com/transaction-records/v1/users/{roblox_user_id}/revenue/summary/day",
+                        headers=headers1,
+                    ) as r:
+                        if r.status == 200:
+                            res = await r.json()
+                            all_data["account_pending"] = res.get("pendingRobux", 0)
+                            all_visible["account_pending"] = True
+                except Exception:
+                    all_data["account_pending"] = 0
+                    all_visible["account_pending"] = False
+
             # Fetch personal account 2
             roblox_stocks_cookie2 = os.getenv("ROBLOX_STOCKS2")
             roblox_user_id2 = os.getenv("ROBLOX_STOCKS_ID2")
 
             if roblox_stocks_cookie2 and roblox_user_id2:
+                headers2 = {"Cookie": roblox_stocks_cookie2}
                 try:
                     async with session.get(
                         f"https://economy.roblox.com/v1/users/{roblox_user_id2}/currency",
-                        headers={"Cookie": roblox_stocks_cookie2},
+                        headers=headers2,
                     ) as r:
                         if r.status == 200:
                             res = await r.json()
@@ -340,6 +357,21 @@ class RobloxCog(commands.Cog):
                 except Exception:
                     all_data["account_balance2"] = 0
                     all_visible["account_balance2"] = False
+
+                await asyncio.sleep(0.3)
+
+                try:
+                    async with session.get(
+                        f"https://apis.roblox.com/transaction-records/v1/users/{roblox_user_id2}/revenue/summary/day",
+                        headers=headers2,
+                    ) as r:
+                        if r.status == 200:
+                            res = await r.json()
+                            all_data["account_pending2"] = res.get("pendingRobux", 0)
+                            all_visible["account_pending2"] = True
+                except Exception:
+                    all_data["account_pending2"] = 0
+                    all_visible["account_pending2"] = False
 
         def fmt(key):
             return f"{Emojis.ROBUX} {all_data.get(key, 0):,}" if all_visible.get(key) else "||HIDDEN||"
@@ -375,7 +407,11 @@ class RobloxCog(commands.Cog):
             discord.ui.TextDisplay("\n".join(group_lines)),
             discord.ui.Separator(),
             discord.ui.TextDisplay("### Plus/Gamepass/In-Game Gift"),
-            discord.ui.TextDisplay(f"**⌖ __Neroniel__ Account Balance**\n{fmt('account_balance')}\n{fmt('account_balance2')}"),
+            discord.ui.TextDisplay(
+                f"**⌖ __Neroniel__ Account Balance**\n"
+                f"{fmt('account_balance')} | {fmt('account_pending')}\n"
+                f"{fmt('account_balance2')} | {fmt('account_pending2')}"
+            ),
             discord.ui.Separator(visible=False),
             discord.ui.TextDisplay(f"-# Neroniel • <t:{now_unix}:f>"),
         )
