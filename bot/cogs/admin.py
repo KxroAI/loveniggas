@@ -1110,8 +1110,8 @@ class AdminCog(commands.Cog):
     async def on_message(self, message: discord.Message):
         if not message.guild:
             return
-        # Skip the bot's own sticky pin messages to avoid infinite loops
-        if message.author.id == self.bot.user.id and message.id in _last_msg.values():
+        # Skip our own messages entirely to prevent sticky repost loops
+        if message.author.id == self.bot.user.id:
             return
         active_pins = _get_pins_for_channel(message.channel.id, message.guild.id)
         if not active_pins:
