@@ -395,7 +395,7 @@ class RobloxCog(commands.Cog):
         container = discord.ui.Container(
             discord.ui.Section(
                 discord.ui.TextDisplay("## Robux Stocks Information"),
-                discord.ui.TextDisplay("### Community Funds | Pending Robux"),
+                discord.ui.TextDisplay("### Robux Balance | Pending Robux"),
                 accessory=thumbnail,
             ),
             discord.ui.Separator(),
