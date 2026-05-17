@@ -277,17 +277,18 @@ class RobloxCog(commands.Cog):
                         res = await r.json()
                         data[f"{key}_funds"] = res.get("robux", 0)
                         visible[f"{key}_funds"] = True
+                        # Default pending to visible (0) when cookie is valid
+                        visible[f"{key}_pending"] = True
 
                 await asyncio.sleep(0.3)
 
                 async with session.get(
-                    f"https://apis.roblox.com/transaction-records/v1/groups/{group_id}/revenue/summary/day",
+                    f"https://economy.roblox.com/v2/groups/{group_id}/transactions/totals?timeFrame=Month&transactionType=summary",
                     headers=headers,
                 ) as r:
                     if r.status == 200:
                         res = await r.json()
-                        data[f"{key}_pending"] = res.get("pendingRobux", 0)
-                        visible[f"{key}_pending"] = True
+                        data[f"{key}_pending"] = res.get("pendingRobuxTotal", 0)
 
             except Exception as e:
                 print(f"[STOCKS] Error fetching {key}: {e}")
@@ -320,6 +321,9 @@ class RobloxCog(commands.Cog):
                             res = await r.json()
                             all_data["account_balance"] = res.get("robux", 0)
                             all_visible["account_balance"] = True
+                            # Default pending to visible (0) when cookie is valid
+                            all_data["account_pending"] = 0
+                            all_visible["account_pending"] = True
                 except Exception:
                     all_data["account_balance"] = 0
                     all_visible["account_balance"] = False
@@ -328,16 +332,14 @@ class RobloxCog(commands.Cog):
 
                 try:
                     async with session.get(
-                        f"https://apis.roblox.com/transaction-records/v1/users/{roblox_user_id}/revenue/summary/day",
+                        f"https://economy.roblox.com/v2/users/{roblox_user_id}/transaction-totals?timeFrame=Month&transactionType=summary",
                         headers=headers1,
                     ) as r:
                         if r.status == 200:
                             res = await r.json()
-                            all_data["account_pending"] = res.get("pendingRobux", 0)
-                            all_visible["account_pending"] = True
-                except Exception:
-                    all_data["account_pending"] = 0
-                    all_visible["account_pending"] = False
+                            all_data["account_pending"] = res.get("pendingRobuxTotal", 0)
+                except Exception as e:
+                    print(f"[STOCKS] account1 pending error: {e}")
 
             # Fetch personal account 2
             roblox_stocks_cookie2 = os.getenv("ROBLOX_STOCKS2")
@@ -354,6 +356,9 @@ class RobloxCog(commands.Cog):
                             res = await r.json()
                             all_data["account_balance2"] = res.get("robux", 0)
                             all_visible["account_balance2"] = True
+                            # Default pending to visible (0) when cookie is valid
+                            all_data["account_pending2"] = 0
+                            all_visible["account_pending2"] = True
                 except Exception:
                     all_data["account_balance2"] = 0
                     all_visible["account_balance2"] = False
@@ -362,16 +367,14 @@ class RobloxCog(commands.Cog):
 
                 try:
                     async with session.get(
-                        f"https://apis.roblox.com/transaction-records/v1/users/{roblox_user_id2}/revenue/summary/day",
+                        f"https://economy.roblox.com/v2/users/{roblox_user_id2}/transaction-totals?timeFrame=Month&transactionType=summary",
                         headers=headers2,
                     ) as r:
                         if r.status == 200:
                             res = await r.json()
-                            all_data["account_pending2"] = res.get("pendingRobux", 0)
-                            all_visible["account_pending2"] = True
-                except Exception:
-                    all_data["account_pending2"] = 0
-                    all_visible["account_pending2"] = False
+                            all_data["account_pending2"] = res.get("pendingRobuxTotal", 0)
+                except Exception as e:
+                    print(f"[STOCKS] account2 pending error: {e}")
 
         def fmt(key):
             return f"{Emojis.ROBUX} {all_data.get(key, 0):,}" if all_visible.get(key) else "||HIDDEN||"
