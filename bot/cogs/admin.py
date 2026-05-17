@@ -1267,28 +1267,34 @@ class AdminCog(commands.Cog):
 
     # ── STICKY PIN: MESSAGE LISTENER ──────────────────────────────────────────
 
+    def _schedule_sticky(self, channel: discord.TextChannel, guild_id: int):
+        active_pins = _get_pins_for_channel(channel.id, guild_id)
+        if not active_pins:
+            return
+        existing = _pending.pop(channel.id, None)
+        if existing and not existing.done():
+            existing.cancel()
+        delay = min(p.delay for p in active_pins)
+        task = asyncio.create_task(self._delayed_repost(channel, active_pins, delay))
+        _pending[channel.id] = task
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if not message.guild:
             return
-        # Skip our own sticky pin messages — three-layer guard:
-        # 1. _posting: channel is actively sending a sticky right now (pre-send race guard)
-        # 2. _sticky_ids: persistent set of every message ID we sent as a sticky
-        # 3. _last_msg: current known sticky IDs per channel+pin key
-        if self.bot.user and message.author.id == self.bot.user.id:
-            if (message.channel.id in _posting
-                    or message.id in _sticky_ids
-                    or message.id in _last_msg.values()):
-                return
-        active_pins = _get_pins_for_channel(message.channel.id, message.guild.id)
-        if not active_pins:
+        if message.author.bot:
             return
-        existing = _pending.pop(message.channel.id, None)
-        if existing and not existing.done():
-            existing.cancel()
-        delay = min(p.delay for p in active_pins)
-        task = asyncio.create_task(self._delayed_repost(message.channel, active_pins, delay))
-        _pending[message.channel.id] = task
+        self._schedule_sticky(message.channel, message.guild.id)
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return
+        if interaction.type != discord.InteractionType.application_command:
+            return
+        if interaction.channel is None:
+            return
+        self._schedule_sticky(interaction.channel, interaction.guild.id)
 
     async def _delayed_repost(self, channel: discord.TextChannel, pins: list[StickyPin], delay: int):
         try:
