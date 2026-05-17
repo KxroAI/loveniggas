@@ -1027,7 +1027,10 @@ class AdminCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.guild:
+        if not message.guild:
+            return
+        # Skip the bot's own sticky pin messages to avoid infinite loops
+        if message.author.id == self.bot.user.id and message.id in _last_msg.values():
             return
         active_pins = _get_pins_for_channel(message.channel.id, message.guild.id)
         if not active_pins:
