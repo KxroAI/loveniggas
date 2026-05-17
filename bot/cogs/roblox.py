@@ -1170,7 +1170,7 @@ class RobloxCog(commands.Cog):
                     discord.ui.Section(
                         discord.ui.TextDisplay(
                             f"## **[{display_name}]({profile_url})**{badge_emojis}\n"
-                            f"##`@{username}` • `{user_id}`"
+                            f"`{username}` • `{user_id}`"
                         ),
                         accessory=discord.ui.Thumbnail(avatar_url or fallback_avatar),
                     ),
