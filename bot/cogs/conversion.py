@@ -25,27 +25,40 @@ class ConversionCog(commands.Cog):
     # HELPER METHODS
     # ══════════════════════════════════════════════════════════════════════════
     
-    def _create_conversion_embed(
+    def _build_conversion_view(
         self,
+        title: str,
         amount: float,
         result: float,
         is_robux_to_php: bool,
         note: str = None,
-    ) -> discord.Embed:
-        """Create a standardized conversion embed."""
-        embed = create_embed()
-        
+    ) -> discord.ui.LayoutView:
+        """Build a Components V2 LayoutView for a conversion result."""
+        now_unix = int(datetime.now(PH_TIMEZONE).timestamp())
+
         if is_robux_to_php:
-            embed.add_field(name="Amount:", value=f"{Emojis.ROBUX} {int(amount):,}", inline=False)
-            embed.add_field(name="Payment:", value=f"{Emojis.PHP} {format_php(result)}", inline=False)
+            amount_line = f"### Amount:\n{Emojis.ROBUX} {int(amount):,}"
+            payment_line = f"### Payment:\n{Emojis.PHP} {format_php(result)}"
         else:
-            embed.add_field(name="Payment:", value=f"{Emojis.PHP} {format_php(amount)}", inline=False)
-            embed.add_field(name="Amount:", value=f"{Emojis.ROBUX} {int(result):,}", inline=False)
-        
+            amount_line = f"### Payment:\n{Emojis.PHP} {format_php(amount)}"
+            payment_line = f"### Amount:\n{Emojis.ROBUX} {int(result):,}"
+
+        items = [
+            discord.ui.TextDisplay(amount_line),
+            discord.ui.TextDisplay(payment_line),
+        ]
+
         if note:
-            embed.add_field(name="Note:", value=note, inline=False)
-        
-        return embed
+            items.append(discord.ui.Separator())
+            items.append(discord.ui.TextDisplay(f"### Note:\n**{note}**"))
+
+        items.append(discord.ui.Separator(visible=False))
+        items.append(discord.ui.TextDisplay(f"-# Neroniel • <t:{now_unix}:f>"))
+
+        container = discord.ui.Container(*items)
+        view = discord.ui.LayoutView()
+        view.add_item(container)
+        return view
     
     # ══════════════════════════════════════════════════════════════════════════
     # PAYOUT COMMAND
@@ -81,8 +94,8 @@ class ConversionCog(commands.Cog):
             "You can view the Group Link by typing `/roblox group` in the chat."
         )
 
-        embed = self._create_conversion_embed(amount, result, is_robux_to_php, note)
-        await interaction.response.send_message(embed=embed)
+        view = self._build_conversion_view("Payout", amount, result, is_robux_to_php, note)
+        await interaction.response.send_message(view=view)
     
     # ══════════════════════════════════════════════════════════════════════════
     # GIFT COMMAND
@@ -113,8 +126,8 @@ class ConversionCog(commands.Cog):
         is_robux_to_php = conversion_type.value == "robux_to_php"
         result = amount * (rate / 1000) if is_robux_to_php else (amount / rate) * 1000
 
-        embed = self._create_conversion_embed(amount, result, is_robux_to_php)
-        await interaction.response.send_message(embed=embed)
+        view = self._build_conversion_view("Gift", amount, result, is_robux_to_php)
+        await interaction.response.send_message(view=view)
     
     # ══════════════════════════════════════════════════════════════════════════
     # NCT COMMAND
@@ -150,8 +163,8 @@ class ConversionCog(commands.Cog):
             "You may view the Gamepass details by typing `/roblox gamepass` in the chat."
         )
 
-        embed = self._create_conversion_embed(amount, result, is_robux_to_php, note)
-        await interaction.response.send_message(embed=embed)
+        view = self._build_conversion_view("Not Covered Tax (NCT)", amount, result, is_robux_to_php, note)
+        await interaction.response.send_message(view=view)
     
     # ══════════════════════════════════════════════════════════════════════════
     # CT COMMAND
@@ -187,8 +200,8 @@ class ConversionCog(commands.Cog):
             "You may view the Gamepass details by typing `/roblox gamepass` in the chat."
         )
 
-        embed = self._create_conversion_embed(amount, result, is_robux_to_php, note)
-        await interaction.response.send_message(embed=embed)
+        view = self._build_conversion_view("Covered Tax (CT)", amount, result, is_robux_to_php, note)
+        await interaction.response.send_message(view=view)
     
     # ══════════════════════════════════════════════════════════════════════════
     # ALL RATES COMMAND
