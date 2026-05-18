@@ -37,11 +37,11 @@ class ConversionCog(commands.Cog):
         now_unix = int(datetime.now(PH_TIMEZONE).timestamp())
 
         if is_robux_to_php:
-            amount_line = f"### Amount:\n{Emojis.ROBUX} {int(amount):,}"
-            payment_line = f"### Payment:\n{Emojis.PHP} {format_php(result)}"
+            amount_line = f"### Amount:\n**{Emojis.ROBUX} {int(amount):,}**"
+            payment_line = f"### Payment:\n**{Emojis.PHP} {format_php(result)}**"
         else:
-            amount_line = f"### Payment:\n{Emojis.PHP} {format_php(amount)}"
-            payment_line = f"### Amount:\n{Emojis.ROBUX} {int(result):,}"
+            amount_line = f"### Payment:\n**{Emojis.PHP} {format_php(amount)}**"
+            payment_line = f"### Amount:\n**{Emojis.ROBUX} {int(result):,}**"
 
         items = [
             discord.ui.TextDisplay(amount_line),
