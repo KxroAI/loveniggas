@@ -161,13 +161,46 @@ class RobloxCog(commands.Cog):
                 verified = full_data.get("hasVerifiedBadge", False)
                 emoji = Emojis.VERIFIED if verified else ""
 
-                # Get friend counts
+                # Get friend counts, roblox badges, and rolimons data in parallel
                 async with session.get(f"https://friends.roblox.com/v1/users/{user_id}/friends/count") as r1, \
                            session.get(f"https://friends.roblox.com/v1/users/{user_id}/followers/count") as r2, \
-                           session.get(f"https://friends.roblox.com/v1/users/{user_id}/followings/count") as r3:
+                           session.get(f"https://friends.roblox.com/v1/users/{user_id}/followings/count") as r3, \
+                           session.get(f"https://accountinformation.roblox.com/v1/users/{user_id}/roblox-badges") as r4, \
+                           session.get(f"https://api.rolimons.com/players/v1/playerinfo/{user_id}") as r5:
                     friends = (await r1.json()).get("count", 0)
                     followers = (await r2.json()).get("count", 0)
                     followings = (await r3.json()).get("count", 0)
+                    roblox_badges_data = await r4.json() if r4.status == 200 else []
+                    rolimons_data = await r5.json() if r5.status == 200 else {}
+
+                rolimons_value = rolimons_data.get("value") or -1
+                rolimons_rap = rolimons_data.get("rap") or -1
+                if rolimons_value >= 0 and rolimons_rap >= 0:
+                    value_str = f"{rolimons_value:,}"
+                    rap_str = f"{rolimons_rap:,}"
+                    value_rap_line = f"**Value | Rap:** [{value_str} | {rap_str}](https://www.rolimons.com/player/{user_id})"
+                else:
+                    value_rap_line = f"**Value | Rap:** [N/A](https://www.rolimons.com/player/{user_id})"
+
+                _ROBLOX_BADGE_EMOJI_MAP = {
+                    "Welcome To The Club": Emojis.BADGE_WELCOME_TO_THE_CLUB,
+                    "Administrator": Emojis.BADGE_ADMINISTRATOR,
+                    "Veteran": Emojis.BADGE_VETERAN,
+                    "Friendship": Emojis.BADGE_FRIENDSHIP,
+                    "Ambassador": Emojis.BADGE_AMBASSADOR,
+                    "Inviter": Emojis.BADGE_INVITER,
+                    "Homestead": Emojis.BADGE_HOMESTEAD,
+                    "Bricksmith": Emojis.BADGE_BRICKSMITH,
+                    "Official Model Maker": Emojis.BADGE_OFFICIAL_MODEL_MAKER,
+                    "Combat Initiation": Emojis.BADGE_COMBAT_INITIATION,
+                    "Warrior": Emojis.BADGE_WARRIOR,
+                    "Bloxxer": Emojis.BADGE_BLOXXER,
+                }
+                roblox_badge_emojis = " ".join(
+                    _ROBLOX_BADGE_EMOJI_MAP[b["name"]]
+                    for b in roblox_badges_data
+                    if b.get("name") in _ROBLOX_BADGE_EMOJI_MAP
+                ) or "N/A"
 
                 # Get premium status (requires cookie)
                 premium = False
@@ -203,7 +236,7 @@ class RobloxCog(commands.Cog):
                     discord.ui.TextDisplay("**## Description**"),
                     discord.ui.TextDisplay(f"```{description[:1000]}```"),
                     discord.ui.Separator(),
-                    discord.ui.TextDisplay(f"**Connections:** {friends}/{followers}/{followings}\n{status_line}"),
+                    discord.ui.TextDisplay(f"**Connections:** {friends}/{followers}/{followings}\n{value_rap_line}\n{status_line}\n**Badges:** {roblox_badge_emojis}"),
                     discord.ui.Separator(visible=False),
                     discord.ui.TextDisplay(f"-# Neroniel • <t:{now_unix}:f>"),
                 )
