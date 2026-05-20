@@ -7,6 +7,7 @@ import os
 import re
 import json
 import base64
+import math
 import aiohttp
 import discord
 from discord import app_commands
@@ -526,16 +527,24 @@ class RobloxCog(commands.Cog):
             return
 
         after_tax = int(amount * 0.7)
-        tax_amount = amount - after_tax
-        price_to_get = int(amount / 0.7)
+        price_to_get = math.ceil(amount / 0.7)
+        now_unix = int(datetime.now(PH_TIMEZONE).timestamp())
 
-        embed = create_embed(title="💰 Roblox Tax Calculator")
-        embed.add_field(name="Original Amount", value=f"{Emojis.ROBUX} {amount:,}", inline=False)
-        embed.add_field(name="After 30% Tax", value=f"{Emojis.ROBUX} {after_tax:,}", inline=True)
-        embed.add_field(name="Tax Amount", value=f"{Emojis.ROBUX} {tax_amount:,}", inline=True)
-        embed.add_field(name="Price to Get Full Amount", value=f"{Emojis.ROBUX} {price_to_get:,}", inline=False)
+        container = discord.ui.Container(
+            discord.ui.TextDisplay("## Roblox Tax Calculator"),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(
+                f"**Amount:**\n{Emojis.ROBUX} {amount:,}\n"
+                f"**After 30% Tax:**\n{Emojis.ROBUX} {after_tax:,}\n"
+                f"**Price to Get Full Amount:**\n{Emojis.ROBUX} {price_to_get:,}"
+            ),
+            discord.ui.Separator(visible=False),
+            discord.ui.TextDisplay(f"-# Neroniel • <t:{now_unix}:f>"),
+        )
 
-        await interaction.response.send_message(embed=embed)
+        view = discord.ui.LayoutView()
+        view.add_item(container)
+        await interaction.response.send_message(view=view)
 
     # ══════════════════════════════════════════════════════════════════════════
     # GAME
