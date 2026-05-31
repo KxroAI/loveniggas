@@ -605,6 +605,9 @@ class NeronielBot(commands.Bot):
             "bot.cogs.giveaway",
             "bot.cogs.admin",
             "bot.cogs.social",
+            "bot.cogs.moderation",
+            "bot.cogs.extras",
+            "bot.cogs.help",
         ]
         
         for cog in cogs:
