@@ -14,7 +14,7 @@ import discord
 from discord.ext import commands, tasks
 from datetime import datetime
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, session
 import threading
 
 from .config import PH_TIMEZONE, BOT_PREFIX, LOG_CHANNEL_ID
@@ -30,6 +30,11 @@ load_dotenv()
 # ══════════════════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "neroniel-dashboard-secret-2024")
+
+# Register dashboard blueprint
+from .dashboard import dashboard_bp  # noqa: E402
+app.register_blueprint(dashboard_bp)
 
 _CHALLENGE_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -606,8 +611,44 @@ class NeronielBot(commands.Bot):
             "bot.cogs.admin",
             "bot.cogs.social",
             "bot.cogs.moderation",
-            "bot.cogs.extras",
+            "bot.cogs.extra",
             "bot.cogs.help",
+            # New cogs from Reo-Bot
+            "bot.cogs.fun",
+            "bot.cogs.vccontrol",
+            "bot.cogs.ticket",
+            "bot.cogs.welcomer",
+            # Antinuke command cogs
+            "bot.cogs.antinuke",
+            "bot.cogs.anti_wl",
+            "bot.cogs.anti_unwl",
+            # Automod command cog
+            "bot.cogs.automod_cmd",
+            # Antinuke event listeners
+            "bot.antinuke.antiban",
+            "bot.antinuke.antikick",
+            "bot.antinuke.antibotadd",
+            "bot.antinuke.antichcr",
+            "bot.antinuke.antichdl",
+            "bot.antinuke.antichup",
+            "bot.antinuke.antieveryone",
+            "bot.antinuke.antiguild",
+            "bot.antinuke.antiIntegration",
+            "bot.antinuke.anti_member_update",
+            "bot.antinuke.antiprune",
+            "bot.antinuke.antirlcr",
+            "bot.antinuke.antirldl",
+            "bot.antinuke.antirlup",
+            "bot.antinuke.antiwebhook",
+            "bot.antinuke.antiwebhookcr",
+            "bot.antinuke.antiwebhookdl",
+            # Automod event listeners
+            "bot.automod.anti_emoji_spam",
+            "bot.automod.anti_invites",
+            "bot.automod.anti_mass_mention",
+            "bot.automod.anticaps",
+            "bot.automod.antilink",
+            "bot.automod.antispam",
         ]
         
         for cog in cogs:
