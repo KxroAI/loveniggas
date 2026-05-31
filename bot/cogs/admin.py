@@ -163,6 +163,7 @@ class StickyPin:
         self.embed_description: str = ""
         self.embed_footer: str = ""
         self.embed_color: int = 0x7289DA
+        self.gif_url: str = ""
         self.channels: list[int] = []
         self.buttons: list[dict] = []
         self.delay: int = 3
@@ -221,6 +222,7 @@ def _pin_to_doc(pin: StickyPin) -> dict:
         "embed_description": pin.embed_description,
         "embed_footer": pin.embed_footer,
         "embed_color": pin.embed_color,
+        "gif_url": pin.gif_url,
         "channels": pin.channels,
         "buttons": pin.buttons,
         "delay": pin.delay,
@@ -236,6 +238,7 @@ def _doc_to_pin(doc: dict) -> StickyPin:
     pin.embed_description = doc.get("embed_description", "")
     pin.embed_footer = doc.get("embed_footer", "")
     pin.embed_color = doc.get("embed_color", 0x7289DA)
+    pin.gif_url = doc.get("gif_url", "")
     pin.channels = doc.get("channels", [])
     pin.buttons = doc.get("buttons", [])
     pin.delay = doc.get("delay", 3)
@@ -320,6 +323,7 @@ class WizardState:
             self.embed_description = edit_pin.embed_description
             self.embed_footer = edit_pin.embed_footer
             self.embed_color = edit_pin.embed_color
+            self.gif_url = edit_pin.gif_url
             self.channels = list(edit_pin.channels)
             self.buttons = list(edit_pin.buttons)
             self.delay = edit_pin.delay
@@ -331,6 +335,7 @@ class WizardState:
             self.embed_description = ""
             self.embed_footer = ""
             self.embed_color = 0x7289DA
+            self.gif_url = ""
             self.channels = []
             self.buttons = []
             self.delay = 3
@@ -467,16 +472,20 @@ def _step1_embed() -> discord.Embed:
 
 class TextContentModal(ui.Modal, title="📝 Text Sticky Content"):
     content = ui.TextInput(label="Message Content", placeholder="Enter the text that will stay pinned...", style=discord.TextStyle.paragraph, max_length=2000, required=True)
+    gif_url = ui.TextInput(label="GIF / Image URL (optional)", placeholder="https://example.com/image.gif — shown above the message", required=False, max_length=512)
 
     def __init__(self, state: WizardState):
         super().__init__()
         self.state = state
         if state.pin_type == "text" and state.content:
             self.content.default = state.content
+        if state.gif_url:
+            self.gif_url.default = state.gif_url
 
     async def on_submit(self, interaction: discord.Interaction):
         self.state.pin_type = "text"
         self.state.content = self.content.value.strip()
+        self.state.gif_url = self.gif_url.value.strip()
         await interaction.response.edit_message(embed=_step2_embed(), view=Step2ChannelView(self.state))
 
 
@@ -485,6 +494,7 @@ class EmbedContentModal(ui.Modal, title="🎨 Create Embed"):
     description = ui.TextInput(label="Description", placeholder="Enter the embed body text...", style=discord.TextStyle.paragraph, max_length=4000, required=True)
     footer = ui.TextInput(label="Footer", placeholder="Footer text (optional)", required=False, max_length=2048)
     color = ui.TextInput(label="Color (hex code, e.g. #FF0000)", placeholder="#7289DA", default="#7289DA", required=False, max_length=9)
+    gif_url = ui.TextInput(label="GIF / Image URL (optional)", placeholder="https://example.com/image.gif — shown above the embed", required=False, max_length=512)
 
     def __init__(self, state: WizardState):
         super().__init__()
@@ -497,6 +507,8 @@ class EmbedContentModal(ui.Modal, title="🎨 Create Embed"):
             if state.embed_footer:
                 self.footer.default = state.embed_footer
             self.color.default = f"#{state.embed_color:06X}"
+        if state.gif_url:
+            self.gif_url.default = state.gif_url
 
     async def on_submit(self, interaction: discord.Interaction):
         self.state.pin_type = "embed"
@@ -504,6 +516,7 @@ class EmbedContentModal(ui.Modal, title="🎨 Create Embed"):
         self.state.embed_description = self.description.value.strip()
         self.state.embed_footer = self.footer.value.strip()
         self.state.embed_color = _parse_color(self.color.value)
+        self.state.gif_url = self.gif_url.value.strip()
         await interaction.response.edit_message(embed=_step2_embed(), view=Step2ChannelView(self.state))
 
 
@@ -706,16 +719,18 @@ class Step4DelayView(ui.View):
 
 def _step5_embed(state: WizardState) -> discord.Embed:
     btn_str = "\n".join(f"• **{b['label']}** → {b['url']}" for b in state.buttons) if state.buttons else "*None*"
+    gif_line = f"\n**GIF / Image:** {state.gif_url}" if state.gif_url else ""
     if state.pin_type == "embed":
         preview = (
             f"**Title:** {state.embed_title or '*(none)*'}\n"
             f"**Description:**\n> {state.embed_description[:200]}{'...' if len(state.embed_description) > 200 else ''}\n"
             f"**Footer:** {state.embed_footer or '*(none)*'}\n"
             f"**Color:** #{state.embed_color:06X}"
+            f"{gif_line}"
         )
         type_label = "🎨 Embed"
     else:
-        preview = f"> {state.content[:300]}{'...' if len(state.content) > 300 else ''}"
+        preview = f"> {state.content[:300]}{'...' if len(state.content) > 300 else ''}{gif_line}"
         type_label = "📝 Text"
 
     e = discord.Embed(
@@ -1324,7 +1339,12 @@ class AdminCog(commands.Cog):
         try:
             _posting.add(channel.id)
             view = pin.build_view()
-            sent = await channel.send(embed=pin.build_embed(), view=view) if pin.pin_type == "embed" else await channel.send(content=pin.content, view=view)
+            gif = pin.gif_url or None
+            if pin.pin_type == "embed":
+                sent = await channel.send(content=gif, embed=pin.build_embed(), view=view)
+            else:
+                body = f"{gif}\n{pin.content}" if gif else pin.content
+                sent = await channel.send(content=body, view=view)
             _sticky_ids.add(sent.id)
             _last_msg[key] = sent.id
             _db_update_last_msg(pin.pin_id, channel.id, sent.id)
