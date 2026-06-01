@@ -797,6 +797,32 @@ class NeronielBot(commands.Bot):
         # Process commands
         await self.process_commands(message)
 
+    @commands.command(name="sync", hidden=True)
+    @commands.is_owner()
+    async def sync_cmd(self, ctx: commands.Context, scope: str = "guild"):
+        """
+        Sync slash commands.
+        Usage:
+          n!sync          → sync to THIS guild (instant, for testing)
+          n!sync global   → sync globally (up to 1 hour to propagate)
+          n!sync clear    → clear guild-specific commands
+        """
+        await ctx.typing()
+        try:
+            if scope == "global":
+                synced = await self.tree.sync()
+                await ctx.reply(f"✅ Synced **{len(synced)}** commands globally.\n*May take up to 1 hour to appear in all servers.*")
+            elif scope == "clear":
+                self.tree.clear_commands(guild=ctx.guild)
+                await self.tree.sync(guild=ctx.guild)
+                await ctx.reply("✅ Cleared guild-specific slash commands. Global commands still apply.")
+            else:
+                self.tree.copy_global_to(guild=ctx.guild)
+                synced = await self.tree.sync(guild=ctx.guild)
+                await ctx.reply(f"✅ Synced **{len(synced)}** commands to **{ctx.guild.name}** instantly!\n*All slash commands should now appear in this server.*")
+        except Exception as e:
+            await ctx.reply(f"❌ Sync failed: {e}")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
