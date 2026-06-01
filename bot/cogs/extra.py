@@ -239,6 +239,51 @@ class ExtrasCog(commands.Cog, name="Extras"):
         if stolen:
             await interaction.followup.send(f"{SUCCESS} Stolen: {' '.join(stolen)}", ephemeral=True)
 
+    # ── ADD EMOJI ─────────────────────────────────────────────────────────────
+
+    @app_commands.command(name="addemoji", description="Add any emoji to this server — no manual uploading needed")
+    @app_commands.describe(emoji="Paste any custom emoji here (e.g. <:name:id> or <a:name:id>)")
+    @app_commands.default_permissions(manage_emojis=True)
+    async def addemoji(self, interaction: discord.Interaction, emoji: str):
+        if not interaction.guild:
+            return await interaction.response.send_message(f"{FAIL} Server only.", ephemeral=True)
+
+        matches = re.findall(r"<(a?):(\w+):(\d+)>", emoji)
+        if not matches:
+            return await interaction.response.send_message(
+                f"{FAIL} That doesn't look like a custom emoji. Paste it like `<:name:id>` or `<a:name:id>`.",
+                ephemeral=True,
+            )
+
+        await interaction.response.defer(ephemeral=True)
+        added = []
+        failed = []
+        async with aiohttp.ClientSession() as session:
+            for animated_flag, name, emoji_id in matches:
+                ext = "gif" if animated_flag == "a" else "png"
+                url = f"https://cdn.discordapp.com/emojis/{emoji_id}.{ext}"
+                try:
+                    async with session.get(url) as resp:
+                        if resp.status != 200:
+                            failed.append(f"`{name}` (download failed)")
+                            continue
+                        data = await resp.read()
+                    new_emoji = await interaction.guild.create_custom_emoji(
+                        name=name,
+                        image=data,
+                        reason=f"Added via /addemoji by {interaction.user}",
+                    )
+                    added.append(str(new_emoji))
+                except discord.HTTPException as e:
+                    failed.append(f"`{name}`: {e}")
+
+        lines = []
+        if added:
+            lines.append(f"{SUCCESS} Added: {' '.join(added)}")
+        if failed:
+            lines.append(f"{FAIL} Failed: " + ", ".join(failed))
+        await interaction.followup.send("\n".join(lines) or f"{FAIL} Nothing was added.", ephemeral=True)
+
     # ── AUTORESPONDER ─────────────────────────────────────────────────────────
 
     @ar.command(name="add", description="Add an autoresponder trigger")
