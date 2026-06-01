@@ -1348,8 +1348,12 @@ class AdminCog(commands.Cog):
                     embed.set_image(url=gif)
                 sent = await channel.send(embed=embed, view=view)
             else:
-                body = f"{pin.content}\n{gif}" if gif else pin.content
-                sent = await channel.send(content=body, view=view)
+                if gif:
+                    embed = discord.Embed(description=pin.content or None, color=0x2b2d31)
+                    embed.set_image(url=gif)
+                    sent = await channel.send(embed=embed, view=view)
+                else:
+                    sent = await channel.send(content=pin.content, view=view)
             _sticky_ids.add(sent.id)
             _last_msg[key] = sent.id
             _db_update_last_msg(pin.pin_id, channel.id, sent.id)
