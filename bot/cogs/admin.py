@@ -1341,9 +1341,12 @@ class AdminCog(commands.Cog):
             view = pin.build_view()
             gif = pin.gif_url or None
             if pin.pin_type == "embed":
-                sent = await channel.send(content=gif, embed=pin.build_embed(), view=view)
+                embed = pin.build_embed()
+                if gif:
+                    embed.set_image(url=gif)
+                sent = await channel.send(embed=embed, view=view)
             else:
-                body = f"{gif}\n{pin.content}" if gif else pin.content
+                body = f"{pin.content}\n{gif}" if gif else pin.content
                 sent = await channel.send(content=body, view=view)
             _sticky_ids.add(sent.id)
             _last_msg[key] = sent.id
