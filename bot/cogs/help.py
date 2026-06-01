@@ -1,6 +1,6 @@
 """
 Help Cog
-Dropdown-based help command using LayoutView (from Meeklys-Src design).
+Dropdown-based help command using LayoutView.
 Available as both /help (slash) and !help (prefix) and on bot mention.
 """
 
@@ -20,7 +20,10 @@ from discord.ui import (
 )
 
 CATEGORY_COMMANDS = {
-    "🤖 AI": "`/ask <prompt>` – Chat with AI\n`/clearhistory` – Clear your AI conversation history",
+    "🤖 AI": (
+        "`/ask <prompt>` – Chat with AI\n"
+        "`/clearhistory` – Clear your AI conversation history"
+    ),
     "🧱 Roblox": (
         "`/roblox group` – Display Roblox group info\n"
         "`/roblox profile <user>` – View a player's profile\n"
@@ -57,10 +60,14 @@ CATEGORY_COMMANDS = {
         "`/banner [user]` – View profile banner\n"
         "`/weather <city>` – Get live weather data\n"
         "`/calculator <num1> <op> <num2>` – Basic math\n"
-        "`/payment <method>` – Show payment instructions\n"
+        "`/payment <method>` – Show payment instructions (Gcash / PayMaya / GoTyme)\n"
         "`/mexc` – Top 10 cryptos by 24h volume on MEXC\n"
-        "`/status` – Bot health & uptime\n"
-        "`/invite` – Get the bot invite link"
+        "`/status` – Bot health, uptime & system stats\n"
+        "`/invite` – Get the bot invite link\n"
+        "`/membercount` – Show member breakdown (total / humans / bots)\n"
+        "`/boostcount` – Show server boost count & Nitro level\n"
+        "`/roleinfo <role>` – Display detailed info about a role\n"
+        "`/firstmessage [channel]` – Link to the first message in a channel"
     ),
     "📢 Giveaways": (
         "`/giveaway <prize> <duration> <winners>` – Start a giveaway\n"
@@ -89,6 +96,7 @@ CATEGORY_COMMANDS = {
         "`/announcement` – Create a server announcement\n"
         "`/say <message>` – Make the bot send a message\n"
         "`/stickypin` – Create and manage sticky-pinned messages in a channel\n"
+        "`/nuke [channel]` – Clone a channel to delete all messages (Admin)\n"
         "`/dm <user> <message>` – DM a user (Owner)\n"
         "`/dmall <message>` – DM all members (Owner)\n"
         "`/createinvite` – Generate invites for all servers (Owner)"
@@ -107,6 +115,7 @@ CATEGORY_COMMANDS = {
     ),
     "⚙️ Extras": (
         "`/steal` – Right-click a message → Apps → Steal Emoji/Sticker\n"
+        "`/addemoji <emoji>` – Add any emoji to this server instantly\n"
         "`/ar add/remove/list` – Manage autoresponders\n"
         "`/react add/remove/list` – Manage autoreacts\n"
         "`/vm setup` – Set up VoiceMaster channels\n"
@@ -136,8 +145,24 @@ CATEGORY_COMMANDS = {
         "`/automod unignore channel <channel>` – Remove channel exemption\n"
         "`/automod unignore role <role>` – Remove role exemption"
     ),
+    "🎵 Music": (
+        "`/play <song>` – Play a song or add it to the queue\n"
+        "`/pause` – Pause the current track\n"
+        "`/resume` – Resume a paused track\n"
+        "`/skip` – Skip to the next track\n"
+        "`/stop` – Stop playback and disconnect\n"
+        "`/loop` – Toggle looping the current track\n"
+        "`/autoplay` – Toggle autoplay (recommends tracks after queue ends)\n"
+        "`/volume [0–100]` – Get or set the player volume\n"
+        "`/nowplaying` – Show current track info and controls\n"
+        "`/queue` – View the full track queue\n"
+        "`/seek <seconds>` – Jump to a position in the current track\n"
+        "`/music setup [channel]` – Set a dedicated music channel (Admin)\n"
+        "`/music reset` – Remove the dedicated music channel (Admin)\n"
+        "`/music settings` – View music configuration (Admin)"
+    ),
     "🎉 Fun": (
-        "-# Fun commands use the `n` prefix (e.g. `nslap @user`)\n\n"
+        "-# Fun commands use the `n` prefix — just type them without a space (e.g. `nslap @user`)\n\n"
         "`nslap [@user]` – Slap someone with a GIF\n"
         "`nhug [@user]` – Hug someone with a GIF\n"
         "`nkiss [@user]` – Kiss someone with a GIF\n"
@@ -186,13 +211,6 @@ CATEGORY_COMMANDS = {
         "`/welcomer test` – Send a test welcome message\n"
         "`/welcomer view` – View current welcomer settings"
     ),
-    "🛠️ Server Tools": (
-        "`/membercount` – Show a breakdown of the server's member count\n"
-        "`/boostcount` – Show boost info and level for this server\n"
-        "`/roleinfo <role>` – Display detailed info about a role\n"
-        "`/firstmessage [channel]` – Link to the first message in a channel\n"
-        "`/nuke [channel]` – Clone a channel to delete all messages (Admin)"
-    ),
 }
 
 
@@ -216,11 +234,12 @@ class HelpView(LayoutView):
         )
         self.dropdown.callback = self.on_select
 
+        total = len(CATEGORY_COMMANDS)
         section = Section(
             TextDisplay(
                 "### <a:butterflys:1408105261226266738> __Neroniel__ is **ready!**\n"
-                "> Pick a category below to see all available commands.\n"
-                "> All commands use `/` slash syntax."
+                f"> Pick from **{total} categories** below to see all available commands.\n"
+                "> Slash commands use `/` · Fun commands use the `n` prefix (e.g. `nslap`)"
             ),
             accessory=Thumbnail(
                 media=discord.UnfurledMediaItem(url=bot.user.display_avatar.url),
