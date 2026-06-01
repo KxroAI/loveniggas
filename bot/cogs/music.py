@@ -393,6 +393,34 @@ class MusicCog(commands.Cog, name="Music"):
 
         return vc
 
+    # ── Search helper ────────────────────────────────────────────────────────
+
+    async def _search(self, query: str):
+        """
+        Search for tracks with multiple source fallbacks.
+        Returns a list of Playable / Playlist, or None on hard failure.
+        Priority: URL → YouTube → SoundCloud
+        """
+        import re as _re
+        _url_re = _re.compile(r"^https?://", _re.IGNORECASE)
+        is_url = bool(_url_re.match(query.strip()))
+
+        attempts = [query] if is_url else [
+            f"ytsearch:{query}",
+            f"scsearch:{query}",
+            query,
+        ]
+
+        for attempt in attempts:
+            try:
+                results = await wavelink.Playable.search(attempt)
+                if results:
+                    return results
+            except Exception as exc:
+                print(f"[Music] Search attempt '{attempt}' failed: {exc}")
+
+        return None
+
     # ─────────────────────────────────────────────────────────────────────────
     # COMMANDS
     # ─────────────────────────────────────────────────────────────────────────
@@ -419,13 +447,11 @@ class MusicCog(commands.Cog, name="Music"):
         if not vc:
             return
 
-        try:
-            results = await wavelink.Playable.search(search)
-        except Exception:
-            return await ctx.reply("❌ Search failed. The music server may be offline.", delete_after=15)
-
+        results = await self._search(search)
+        if results is None:
+            return await ctx.reply("❌ Search failed. The music server may be offline — try again in a moment.", delete_after=15)
         if not results:
-            return await ctx.reply("❌ No results found.", delete_after=10)
+            return await ctx.reply("❌ No results found. Try a different search term.", delete_after=10)
 
         if isinstance(results, wavelink.Playlist):
             tracks = results.tracks
@@ -434,6 +460,9 @@ class MusicCog(commands.Cog, name="Music"):
             added = len(tracks)
             await vc.queue.put_wait(tracks)  # type: ignore[arg-type]
             await ctx.reply(f"📋 Added playlist **{results.name}** ({added} tracks) to the queue.")
+            if not vc.current:
+                await vc.play(vc.queue.get(), volume=80)
+            await self._update_controller(ctx.guild, command_channel=ctx.channel)
         else:
             track: wavelink.Playable = results[0]
             track.extras = {"requester": ctx.author.id}
