@@ -766,6 +766,7 @@ class Step5PreviewView(ui.View):
             existing.embed_description = self.state.embed_description
             existing.embed_footer = self.state.embed_footer
             existing.embed_color = self.state.embed_color
+            existing.gif_url = self.state.gif_url
             existing.channels = self.state.channels
             existing.buttons = self.state.buttons
             existing.delay = self.state.delay
@@ -778,6 +779,7 @@ class Step5PreviewView(ui.View):
             pin.embed_description = self.state.embed_description
             pin.embed_footer = self.state.embed_footer
             pin.embed_color = self.state.embed_color
+            pin.gif_url = self.state.gif_url
             pin.channels = self.state.channels
             pin.buttons = self.state.buttons
             pin.delay = self.state.delay
