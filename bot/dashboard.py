@@ -27,13 +27,21 @@ dashboard_bp = Blueprint("dashboard", __name__, url_prefix="/dashboard")
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
 def _redirect_uri() -> str:
+    # 1) Explicit override
     custom = os.getenv("DASHBOARD_REDIRECT_URI")
     if custom:
         return custom
+    # 2) DASHBOARD_BASE_URL from .env (e.g. https://mybot.replit.app)
+    base = os.getenv("DASHBOARD_BASE_URL", "").rstrip("/")
+    if base:
+        return f"{base}/dashboard/callback"
+    # 3) Auto-detect Replit dev domain
     dev_domain = os.getenv("REPLIT_DEV_DOMAIN")
     if dev_domain:
         return f"https://{dev_domain}/dashboard/callback"
-    return "http://localhost:5000/dashboard/callback"
+    # 4) Localhost fallback
+    port = os.getenv("WEB_PORT", "5000")
+    return f"http://localhost:{port}/dashboard/callback"
 
 
 def _discord_get(endpoint: str, token: str):
@@ -67,13 +75,14 @@ def _exchange_code(code: str):
     client_id     = os.getenv("DISCORD_CLIENT_ID")
     client_secret = os.getenv("DISCORD_CLIENT_SECRET")
     if not client_id or not client_secret:
-        return None
+        return None, "DISCORD_CLIENT_ID or DISCORD_CLIENT_SECRET is not set."
+    redirect = _redirect_uri()
     data = urllib.parse.urlencode({
         "client_id":     client_id,
         "client_secret": client_secret,
         "grant_type":    "authorization_code",
         "code":          code,
-        "redirect_uri":  _redirect_uri(),
+        "redirect_uri":  redirect,
         "scope":         SCOPES,
     }).encode()
     req = urllib.request.Request(
@@ -83,9 +92,17 @@ def _exchange_code(code: str):
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return _json.loads(resp.read().decode())
-    except Exception:
-        return None
+            return _json.loads(resp.read().decode()), None
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        return None, (
+            f"Discord returned HTTP {e.code}. "
+            f"Make sure this **exact redirect URI** is added to your Discord app's OAuth2 Redirects:\n\n"
+            f"`{redirect}`\n\n"
+            f"Discord error: `{body}`"
+        )
+    except Exception as exc:
+        return None, str(exc)
 
 
 def _revoke_token(token: str):
@@ -319,6 +336,40 @@ def _err(msg: str, code: int = 400):
 
 # ─── routes ──────────────────────────────────────────────────────────────────
 
+@dashboard_bp.route("/debug")
+def debug():
+    redirect = _redirect_uri()
+    client_id = os.getenv("DISCORD_CLIENT_ID", "NOT SET")
+    return render_template_string(
+        _T_BASE_HEAD + _T_NAV_ANON + """
+<div class="container">
+  <div class="page-title">⚙️ Dashboard Debug</div>
+  <div class="page-sub">Use this info to configure your Discord application correctly.</div>
+  <div class="card">
+    <div class="section-title">OAuth2 Redirect URI</div>
+    <p style="margin-bottom:8px;color:#949ba4;font-size:.875rem;">
+      Add this <strong>exact URL</strong> to your Discord app's OAuth2 Redirects at
+      <a href="https://discord.com/developers/applications" target="_blank">discord.com/developers/applications</a>
+      → Your App → OAuth2 → Redirects.
+    </p>
+    <code style="background:#111214;padding:10px 14px;border-radius:6px;display:block;word-break:break-all;color:#5865f2;">""" + redirect + """</code>
+  </div>
+  <div class="card">
+    <div class="section-title">Environment Check</div>
+    <table class="info-table">
+      <tr><td>DISCORD_CLIENT_ID</td><td>""" + ("✅ Set" if client_id != "NOT SET" else "❌ Not set") + """</td></tr>
+      <tr><td>DISCORD_CLIENT_SECRET</td><td>""" + ("✅ Set" if os.getenv("DISCORD_CLIENT_SECRET") else "❌ Not set") + """</td></tr>
+      <tr><td>REPLIT_DEV_DOMAIN</td><td><code>""" + (os.getenv("REPLIT_DEV_DOMAIN", "not set")) + """</code></td></tr>
+      <tr><td>DASHBOARD_REDIRECT_URI</td><td><code>""" + (os.getenv("DASHBOARD_REDIRECT_URI", "not set — auto-detected")) + """</code></td></tr>
+    </table>
+  </div>
+  <a href="/dashboard" class="btn btn-primary">← Back to Dashboard</a>
+</div>
+</body></html>""",
+        page_title="Debug",
+    )
+
+
 @dashboard_bp.route("/")
 def index():
     client_id = os.getenv("DISCORD_CLIENT_ID")
@@ -395,9 +446,10 @@ def callback():
     if state != session.get("oauth_state"):
         return _err("Invalid OAuth state. Please try logging in again.", 400)
 
-    token_data = _exchange_code(code)
-    if not token_data or "access_token" not in token_data:
-        return _err("Failed to exchange authorization code. Check DISCORD_CLIENT_SECRET.", 500)
+    token_data, exchange_err = _exchange_code(code)
+    if exchange_err or not token_data or "access_token" not in token_data:
+        msg = exchange_err or "Unexpected response from Discord — no access token returned."
+        return _err(msg, 500)
 
     access_token = token_data["access_token"]
     user         = _discord_get("/users/@me", access_token)
