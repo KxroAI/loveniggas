@@ -16,8 +16,8 @@ from discord import app_commands
 
 
 # ── Lavalink node config (override via env vars) ─────────────────────────────
-_LAVALINK_URI = os.getenv("LAVALINK_URI", "https://lava-v4.ajieblogs.eu.org:443/")
-_LAVALINK_PASS = os.getenv("LAVALINK_PASSWORD", "https://dsc.gg/ajidevserver")
+_LAVALINK_URI = os.getenv("LAVALINK_URI", "https://lavalink.jirayu.net:443")
+_LAVALINK_PASS = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
