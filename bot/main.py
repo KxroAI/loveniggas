@@ -20,6 +20,7 @@ import threading
 from .config import PH_TIMEZONE, BOT_PREFIX, LOG_CHANNEL_ID
 from .database import db
 from .utils import create_embed
+from .sync_emojis import run_sync as _run_emoji_sync
 
 # Load environment variables
 load_dotenv()
@@ -30,7 +31,7 @@ load_dotenv()
 # ══════════════════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "neroniel-dashboard-secret-2024")
+app.secret_key = os.getenv("DASHBOARD_SECRET", os.getenv("FLASK_SECRET_KEY", "neroniel-dashboard-local-secret-CHANGE-ME"))
 
 # Register dashboard blueprint
 from .dashboard import dashboard_bp  # noqa: E402
@@ -571,7 +572,9 @@ def solver_page():
 
 
 def run_server():
-    app.run(host="0.0.0.0", port=5000)
+    host = os.getenv("WEB_HOST", "0.0.0.0")
+    port = int(os.getenv("WEB_PORT", "5000"))
+    app.run(host=host, port=port)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -587,7 +590,7 @@ class NeronielBot(commands.Bot):
         intents.members = True
         
         super().__init__(
-            command_prefix=BOT_PREFIX,
+            command_prefix=commands.when_mentioned_or("n"),
             intents=intents,
             help_command=None,
         )
@@ -603,6 +606,8 @@ class NeronielBot(commands.Bot):
         # Load all cogs
         cogs = [
             "bot.cogs.log",
+            "bot.cogs.guild_events",
+            "bot.cogs.music",
             "bot.cogs.ai",
             "bot.cogs.utility",
             "bot.cogs.conversion",
@@ -799,7 +804,22 @@ class NeronielBot(commands.Bot):
 
 def main():
     """Main entry point for the bot."""
-    # Start keepalive server
+    # ── Emoji Sync (optional) ──────────────────────────────────────────────
+    if os.getenv("SYNC_EMOJIS", "False").strip().lower() == "true":
+        print("[EmojiSync] SYNC_EMOJIS=True — running startup emoji sync...")
+        try:
+            _run_emoji_sync()
+        except Exception as _e:
+            print(f"[EmojiSync] ✖ Sync error (non-fatal): {_e}")
+    else:
+        print("[EmojiSync] SYNC_EMOJIS is disabled — skipping.")
+
+    # Start web server (always on Replit for keepalive; dashboard routes are gated separately)
+    dashboard_enabled = os.getenv("DASHBOARD_ENABLED", "False").strip().lower() == "true"
+    if dashboard_enabled:
+        print("[Dashboard] DASHBOARD_ENABLED=True — starting web server with dashboard.")
+    else:
+        print("[Dashboard] DASHBOARD_ENABLED=False — starting keepalive server only.")
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
     
