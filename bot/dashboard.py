@@ -6,6 +6,7 @@ Optional: DASHBOARD_REDIRECT_URI (auto-detected from REPLIT_DEV_DOMAIN if not se
 """
 
 import os
+import time as _time
 import urllib.parse
 import urllib.request
 import json as _json
@@ -13,6 +14,30 @@ import secrets as _secrets
 
 from flask import Blueprint, redirect, request, session, render_template_string
 from datetime import datetime, timezone
+
+# ── Server-side OAuth state store ────────────────────────────────────────────
+# Keyed by state token → expiry Unix timestamp.
+# Avoids relying on Flask session cookies (which can be lost on cross-site
+# redirects from Discord back to Render/production hosts).
+_pending_states: dict[str, float] = {}
+
+def _register_state(state: str, ttl: int = 600) -> None:
+    """Store an OAuth state with a TTL (default 10 min)."""
+    _pending_states[state] = _time.time() + ttl
+    # Prune expired entries on each write
+    now = _time.time()
+    expired = [k for k, v in list(_pending_states.items()) if v < now]
+    for k in expired:
+        _pending_states.pop(k, None)
+
+def _consume_state(state: str) -> bool:
+    """Return True and remove state if it's valid and unexpired."""
+    if not state:
+        return False
+    expiry = _pending_states.pop(state, None)
+    if expiry is None:
+        return False
+    return _time.time() < expiry
 
 DISCORD_API = "https://discord.com/api/v10"
 OAUTH_URL   = "https://discord.com/api/oauth2/authorize"
@@ -421,7 +446,7 @@ def login():
         return _err("DISCORD_CLIENT_ID is not set in environment variables.", 500)
 
     state = _secrets.token_urlsafe(16)
-    session["oauth_state"] = state
+    _register_state(state)
 
     params = urllib.parse.urlencode({
         "client_id":     client_id,
@@ -443,7 +468,7 @@ def callback():
     state = request.args.get("state")
     if not code:
         return _err("No authorization code received from Discord.", 400)
-    if state != session.get("oauth_state"):
+    if not _consume_state(state):
         return _err("Invalid OAuth state. Please try logging in again.", 400)
 
     token_data, exchange_err = _exchange_code(code)
@@ -457,7 +482,6 @@ def callback():
 
     _revoke_token(access_token)
 
-    session.pop("oauth_state", None)
     session["discord_user"]   = user
     session["discord_guilds"] = guilds
 
