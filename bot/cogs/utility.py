@@ -304,7 +304,7 @@ class UtilityCog(commands.Cog):
     async def invite(self, interaction: discord.Interaction):
         embed = create_embed(
             title="🔗 Invite N Bot",
-            description="Click [here](https://discord.com/oauth2/authorize?client_id=1358242947790803084&permissions=8&integration_type=0&scope=bot%20applications.commands) to invite the bot to your server!",
+            description="Click [here](https://discord.com/oauth2/authorize?client_id=1504439715934507028&permissions=8&integration_type=0&scope=bot%20applications.commands) to invite the bot to your server!",
         )
         await interaction.response.send_message(embed=embed)
     
