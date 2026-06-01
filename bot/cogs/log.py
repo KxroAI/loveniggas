@@ -18,6 +18,56 @@ class LogCog(commands.Cog):
         self._seen: set[int] = set()
         self._seen_order: deque[int] = deque(maxlen=500)
 
+    # ── PREFIX COMMAND LOGGING ─────────────────────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_command(self, ctx: commands.Context):
+        """Log every prefix command invocation to the log channel."""
+        self.bot.command_count += 1
+
+        try:
+            log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
+            if not log_channel:
+                log_channel = await self.bot.fetch_channel(LOG_CHANNEL_ID)
+            if not log_channel:
+                return
+
+            cmd_name = ctx.command.qualified_name if ctx.command else "Unknown"
+
+            # Build args string from the raw message (strip prefix + command name)
+            raw_args = ctx.message.content.strip()
+            # Remove the invoking prefix+name to show just arguments
+            prefix_used = ctx.prefix or ""
+            invoked_with = ctx.invoked_with or ""
+            args_str = raw_args[len(prefix_used) + len(invoked_with):].strip() or "None"
+
+            server_name = ctx.guild.name if ctx.guild else "Direct Message"
+            server_id   = f"`{ctx.guild.id}`" if ctx.guild else "`N/A`"
+            channel_name = (
+                ctx.channel.name
+                if ctx.guild and hasattr(ctx.channel, "name")
+                else "Direct Message"
+            )
+            channel_id = f"`{ctx.channel.id}`" if ctx.channel else "`N/A`"
+
+            embed = create_embed(
+                title="📝 Command Used",
+                description=(
+                    f"**Command:** ``{prefix_used}{cmd_name}``\n"
+                    f"**User:** {ctx.author.mention} (``{ctx.author.id}``)\n"
+                    f"**Server:** {server_name} ({server_id})\n"
+                    f"**Channel:** {channel_name} ({channel_id})\n"
+                    f"**Arguments:**\n{args_str}"
+                ),
+            )
+
+            await log_channel.send(embed=embed)
+
+        except Exception as e:
+            print(f"[LOG] Prefix command log error: {e}")
+
+    # ── SLASH COMMAND LOGGING ──────────────────────────────────────────────────
+
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
         if interaction.type != discord.InteractionType.application_command:
