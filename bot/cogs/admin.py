@@ -4,8 +4,10 @@ Owner and administrator only commands, plus sticky pin management.
 """
 
 import asyncio
+import io
 import time
 import uuid
+import aiohttp
 import discord
 from discord import app_commands, ui
 from discord.ext import commands
@@ -269,6 +271,35 @@ def _db_update_last_msg(pin_id: str, channel_id: int, msg_id: int) -> None:
         {"pin_id": pin_id},
         {"$set": {f"last_messages.{channel_id}": msg_id}},
     )
+
+
+async def _send_with_image(
+    channel: discord.TextChannel,
+    text: str | None,
+    image_url: str,
+    view: discord.ui.View,
+) -> discord.Message:
+    """
+    Send a message with an inline image attachment (no embed box).
+    Downloads the image from image_url and re-uploads it so Discord
+    shows it as an actual image — not a filename link and not an embed.
+    Falls back to an embed if the download fails.
+    """
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(image_url) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    ct = resp.content_type or ""
+                    fname = "image.gif" if ("gif" in ct or image_url.lower().split("?")[0].endswith(".gif")) else "image.png"
+                    file = discord.File(io.BytesIO(data), filename=fname)
+                    return await channel.send(content=text or None, file=file, view=view)
+    except Exception as e:
+        print(f"[StickyPin] Image re-upload failed ({e}), falling back to embed")
+    embed = discord.Embed(description=text or None, color=0x2b2d31)
+    embed.set_image(url=image_url)
+    return await channel.send(embed=embed, view=view)
 
 
 def _db_load_pins() -> None:
@@ -1349,9 +1380,7 @@ class AdminCog(commands.Cog):
                 sent = await channel.send(embed=embed, view=view)
             else:
                 if gif:
-                    embed = discord.Embed(description=pin.content or None, color=0x2b2d31)
-                    embed.set_image(url=gif)
-                    sent = await channel.send(embed=embed, view=view)
+                    sent = await _send_with_image(channel, pin.content, gif, view)
                 else:
                     sent = await channel.send(content=pin.content, view=view)
             _sticky_ids.add(sent.id)
