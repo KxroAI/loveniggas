@@ -63,6 +63,8 @@ class LogCog(commands.Cog):
 
             await log_channel.send(embed=embed)
 
+        except discord.Forbidden:
+            pass
         except Exception as e:
             print(f"[LOG] Prefix command log error: {e}")
 
@@ -123,6 +125,8 @@ class LogCog(commands.Cog):
 
             await log_channel.send(embed=embed)
 
+        except discord.Forbidden:
+            pass
         except Exception as e:
             print(f"[LOG] Error: {e}")
 
