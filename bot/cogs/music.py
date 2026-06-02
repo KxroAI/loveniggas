@@ -1183,10 +1183,6 @@ class MusicCog(commands.Cog, name="Music"):
 
     # ── /music group ──────────────────────────────────────────────────────────
 
-    music_group = app_commands.Group(
-        name="music", description="Music configuration commands"
-    )
-
     @commands.hybrid_group(name="music", description="Music configuration commands.", with_app_command=True, invoke_without_command=True)
     @commands.has_permissions(administrator=True)
     @commands.guild_only()
@@ -1203,7 +1199,7 @@ class MusicCog(commands.Cog, name="Music"):
         embed.set_footer(text=f"Requested by {ctx.author}")
         await ctx.send(embed=embed)
 
-    @music_cmd.command(name="setup", description="Create a dedicated music channel.", with_app_command=True)
+    @music_cmd.command(name="setup", description="Create a dedicated music channel.")
     @commands.has_permissions(administrator=True)
     @commands.guild_only()
     async def music_setup(self, ctx: commands.Context):
@@ -1243,7 +1239,7 @@ class MusicCog(commands.Cog, name="Music"):
         except Exception:
             print(f"[Music] music_setup error:\n{traceback.format_exc()}")
 
-    @music_cmd.command(name="reset", description="Remove the dedicated music channel.", with_app_command=True)
+    @music_cmd.command(name="reset", description="Remove the dedicated music channel.")
     @commands.has_permissions(administrator=True)
     @commands.guild_only()
     async def music_reset(self, ctx: commands.Context):
@@ -1280,7 +1276,7 @@ class MusicCog(commands.Cog, name="Music"):
         except Exception:
             print(f"[Music] music_reset error:\n{traceback.format_exc()}")
 
-    @music_cmd.command(name="settings", description="View and edit music settings.", with_app_command=True)
+    @music_cmd.command(name="settings", description="View and edit music settings.")
     @commands.has_permissions(administrator=True)
     @commands.guild_only()
     async def music_settings(self, ctx: commands.Context):
