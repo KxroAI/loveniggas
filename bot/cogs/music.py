@@ -1,9 +1,8 @@
 """
-Music Cog — wavelink 3.x / Lavalink
-Components v2 controller (LayoutView + Container + MediaGallery)
-PIL-generated banner image
+Music Cog — Neroniel Bot
+Components v2 controller · PIL banner · aiosqlite persistence
 Commands: play, pause, resume, skip, stop, loop, queue, volume,
-          autoplay, nowplaying, seek  +  music setup/reset/settings
+          autoplay, current/nowplaying  +  music setup/reset/settings
 """
 
 import asyncio
@@ -11,6 +10,7 @@ import datetime
 import io
 import os
 import re
+import sys
 import traceback
 
 import discord
@@ -20,10 +20,12 @@ from discord.ext import commands
 
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageFilter
+    import urllib.request as _urllib_req
     _PIL_OK = True
 except ImportError:
     _PIL_OK = False
 
+import aiosqlite
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -37,21 +39,23 @@ _DEFAULT_BANNER = (
     "556739ef9907bece29f4c034&"
 )
 
-_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+_DB_PATH = "db/music.db"
+_URL_RE  = re.compile(r"^https?://", re.IGNORECASE)
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Time helpers ──────────────────────────────────────────────────────────────
 
 def _fmt_ms(ms: int) -> str:
     try:
         s = int(ms) // 1000
         m, s = divmod(s, 60)
         h, m = divmod(m, 60)
-        if h:
-            return f"{h}h {m}m {s}s"
-        if m:
-            return f"{m}m {s}s"
-        return f"{s}s"
+        d, h = divmod(h, 24)
+        parts = []
+        if d: parts.append(f"{d}D")
+        if h: parts.append(f"{h}h")
+        if m: parts.append(f"{m}m")
+        if s: parts.append(f"{s}s")
+        return " ".join(parts) or "0s"
     except Exception:
         return "???"
 
@@ -62,7 +66,7 @@ def _trunc(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else f"{text[:limit - 3]}..."
 
 
-# ── PIL banner generator (adapted from reference bot) ─────────────────────────
+# ── PIL banner (Neroniel's create_simple_music_banner, adapted) ────────────────
 
 def _create_music_banner(
     thumbnail_url: str,
@@ -70,25 +74,16 @@ def _create_music_banner(
     author: str,
     duration_ms: int,
     position_ms: int,
-) -> io.BytesIO | None:
-    """
-    Generates a 1200×300 music banner image and returns it as a BytesIO.
-    Falls back to None if PIL is unavailable or something goes wrong.
-    """
+) -> "io.BytesIO | None":
     if not _PIL_OK:
         return None
     try:
-        import urllib.request as _urllib
-
         width, height = 1200, 300
 
-        def _load(url: str) -> Image.Image:
+        def _load(url: str) -> "Image.Image":
             try:
-                req = _urllib.Request(
-                    url,
-                    headers={"User-Agent": "Mozilla/5.0"},
-                )
-                with _urllib.urlopen(req, timeout=8) as r:
+                req = _urllib_req.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with _urllib_req.urlopen(req, timeout=8) as r:
                     return Image.open(io.BytesIO(r.read())).convert("RGBA")
             except Exception:
                 return Image.new("RGBA", (200, 200), (50, 50, 50, 255))
@@ -101,21 +96,19 @@ def _create_music_banner(
                 text = text[:-1]
             return f"{text}..."
 
-        raw   = _load(thumbnail_url or _DEFAULT_BANNER)
-        bg    = raw.resize((width, height), Image.LANCZOS).filter(ImageFilter.GaussianBlur(radius=20))
-        over  = Image.new("RGBA", (width, height), (0, 0, 0, 180))
-        canvas = Image.alpha_composite(bg, over)
-        draw  = ImageDraw.Draw(canvas)
+        raw = _load(thumbnail_url or _DEFAULT_BANNER)
+        bg  = raw.resize((width, height), Image.LANCZOS).filter(ImageFilter.GaussianBlur(radius=25))
+        ov  = Image.new("RGBA", (width, height), (0, 0, 0, 200))
+        canvas = Image.alpha_composite(bg, ov)
+        draw   = ImageDraw.Draw(canvas)
 
-        # Thumbnail
         art_size = 200
-        ax, ay   = 50, 50
-        art = raw.resize((art_size, art_size), Image.LANCZOS)
+        ax, ay = 50, 50
+        art  = raw.resize((art_size, art_size), Image.LANCZOS)
         mask = Image.new("L", (art_size, art_size), 0)
         ImageDraw.Draw(mask).rounded_rectangle([0, 0, art_size, art_size], radius=15, fill=255)
         canvas.paste(art, (ax, ay), mask=mask)
 
-        # Fonts
         try:
             f_title  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
             f_artist = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
@@ -123,12 +116,11 @@ def _create_music_banner(
         except Exception:
             f_title = f_artist = f_time = ImageFont.load_default()
 
-        info_x   = ax + art_size + 40
-        max_tw   = width - info_x - 50
+        info_x  = ax + art_size + 40
+        max_tw  = width - info_x - 50
         draw.text((info_x, 60),  _fit(draw, title,  f_title,  max_tw), fill=(255, 255, 255, 255), font=f_title)
         draw.text((info_x, 110), _fit(draw, author, f_artist, max_tw), fill=(180, 180, 180, 255), font=f_artist)
 
-        # Progress bar
         bx, by, bw, bh = info_x, 160, max_tw, 12
         draw.rounded_rectangle([bx, by, bx + bw, by + bh], radius=6, fill=(255, 255, 255, 40))
         ratio = max(0.0, min(1.0, position_ms / duration_ms if duration_ms > 0 else 0.0))
@@ -136,8 +128,8 @@ def _create_music_banner(
         if pw > 0:
             draw.rounded_rectangle([bx, by, bx + pw, by + bh], radius=6, fill=(255, 255, 255, 255))
 
-        cur  = _fmt_ms(max(position_ms, 0))
-        tot  = _fmt_ms(max(duration_ms, 0))
+        cur = _fmt_ms(max(position_ms, 0))
+        tot = _fmt_ms(max(duration_ms, 0))
         draw.text((bx, by + 22), cur, fill=(200, 200, 200, 255), font=f_time)
         tw = int(draw.textlength(tot, font=f_time))
         draw.text((bx + bw - tw, by + 22), tot, fill=(200, 200, 200, 255), font=f_time)
@@ -151,75 +143,122 @@ def _create_music_banner(
         return None
 
 
+# ── aiosqlite helpers ─────────────────────────────────────────────────────────
+
+async def _db_init():
+    async with aiosqlite.connect(_DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS music_settings (
+                guild_id    TEXT PRIMARY KEY,
+                channel_id  TEXT,
+                message_id  TEXT,
+                default_volume INTEGER DEFAULT 80
+            )
+        """)
+        await db.commit()
+
+
+async def _db_get(guild_id: int) -> dict:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM music_settings WHERE guild_id = ?", (str(guild_id),)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else {}
+
+
+async def _db_upsert(guild_id: int, **kwargs):
+    async with aiosqlite.connect(_DB_PATH) as db:
+        existing = await db.execute(
+            "SELECT guild_id FROM music_settings WHERE guild_id = ?", (str(guild_id),)
+        )
+        row = await existing.fetchone()
+        if row:
+            if kwargs:
+                sets = ", ".join(f"{k} = ?" for k in kwargs)
+                await db.execute(
+                    f"UPDATE music_settings SET {sets} WHERE guild_id = ?",
+                    (*kwargs.values(), str(guild_id)),
+                )
+        else:
+            kwargs["guild_id"] = str(guild_id)
+            cols = ", ".join(kwargs.keys())
+            placeholders = ", ".join("?" * len(kwargs))
+            await db.execute(
+                f"INSERT INTO music_settings ({cols}) VALUES ({placeholders})",
+                tuple(kwargs.values()),
+            )
+        await db.commit()
+
+
+async def _db_delete(guild_id: int):
+    async with aiosqlite.connect(_DB_PATH) as db:
+        await db.execute("DELETE FROM music_settings WHERE guild_id = ?", (str(guild_id),))
+        await db.commit()
+
+
 # ── Components v2 Controller View ─────────────────────────────────────────────
 
 class MusicControllerView(discord.ui.LayoutView):
-    """Components v2 music controller using Container + MediaGallery."""
 
     def __init__(
         self,
         cog: "MusicCog",
         guild: discord.Guild,
-        player: wavelink.Player | None,
-        artwork_url: str,
+        player: "wavelink.Player | None",
+        artwork_media: str,
         interactive: bool = True,
     ) -> None:
         super().__init__(timeout=None if interactive else 180)
-        self.cog        = cog
-        self.guild      = guild
-        self.player     = player
-        self.interactive = interactive and player is not None
-        self.artwork_url = artwork_url
+        self.cog          = cog
+        self.guild        = guild
+        self.player       = player
+        self.interactive  = interactive and player is not None
+        self.artwork_media = artwork_media
         self._build()
 
     def _build(self) -> None:
-        container = discord.ui.Container(accent_colour=discord.Colour.blurple())
-
-        # ── Title ──────────────────────────────────────────────────────────
+        container = discord.ui.Container()
         container.add_item(discord.ui.TextDisplay("# 🎵 Music"))
 
-        # ── Now playing info ───────────────────────────────────────────────
         if self.player and self.player.current:
             t      = self.player.current
-            status = "⏸ Paused" if self.player.paused else "▶️ Playing"
+            status = "Paused" if self.player.paused else "Playing"
             pos    = max(0, getattr(self.player, "position", 0))
-            loop   = "🔁" if self.player.queue.mode == wavelink.QueueMode.loop else ""
-            ap     = "🔀" if self.player.autoplay != wavelink.AutoPlayMode.disabled else ""
-
             container.add_item(discord.ui.TextDisplay(
                 f"## {_trunc(t.title, 64)}"
             ))
             container.add_item(discord.ui.TextDisplay(
-                f"-# {_trunc(t.author, 48)} · {status} {loop}{ap} · "
+                f"-# {_trunc(t.author, 56)} · {status} · "
                 f"`{_fmt_ms(pos)} / {_fmt_ms(t.length)}`"
             ))
         else:
             container.add_item(discord.ui.TextDisplay("## Nothing is playing"))
             container.add_item(discord.ui.TextDisplay(
-                "-# Use `/play` to start a session."
+                "-# Drop a song name in the music channel or use `/play` to start."
             ))
 
-        # ── Artwork ────────────────────────────────────────────────────────
         gallery = discord.ui.MediaGallery()
-        gallery.add_item(media=self.artwork_url, description="Now playing artwork")
+        gallery.add_item(media=self.artwork_media, description="Music artwork")
         container.add_item(gallery)
 
         container.add_item(discord.ui.Separator())
-
-        # ── Queue summary ──────────────────────────────────────────────────
         container.add_item(discord.ui.TextDisplay(
-            self._queue_summary()
+            self.cog._build_queue_summary(self.player)
         ))
-
         container.add_item(discord.ui.Separator())
 
-        # ── Control buttons ────────────────────────────────────────────────
+        # ── Control row ────────────────────────────────────────────────────
         controls = discord.ui.ActionRow()
 
-        is_paused = self.player and self.player.paused
         pause_btn = discord.ui.Button(
-            label="▶️ Resume" if is_paused else "⏸ Pause",
-            style=discord.ButtonStyle.success if is_paused else discord.ButtonStyle.secondary,
+            label="Resume" if (self.player and self.player.paused) else "Pause",
+            style=(
+                discord.ButtonStyle.success
+                if (self.player and self.player.paused)
+                else discord.ButtonStyle.secondary
+            ),
             disabled=not self.interactive,
         )
         skip_btn = discord.ui.Button(
@@ -234,29 +273,29 @@ class MusicControllerView(discord.ui.LayoutView):
         )
 
         if self.interactive:
-            pause_btn.callback = self._pause_callback
-            skip_btn.callback  = self._skip_callback
-            stop_btn.callback  = self._stop_callback
+            pause_btn.callback = self.cog.pause_resume_button_callback
+            skip_btn.callback  = self.cog.skip_button_callback
+            stop_btn.callback  = self.cog.stop_button_callback
 
         controls.add_item(pause_btn)
         controls.add_item(skip_btn)
         controls.add_item(stop_btn)
         container.add_item(controls)
 
-        # ── Utility buttons ────────────────────────────────────────────────
+        # ── Utility row ────────────────────────────────────────────────────
         utils = discord.ui.ActionRow()
 
-        loop_on = self.player and self.player.queue.mode == wavelink.QueueMode.loop
         ap_on   = self.player and self.player.autoplay != wavelink.AutoPlayMode.disabled
+        loop_on = self.player and self.player.queue.mode == wavelink.QueueMode.loop
 
-        loop_btn = discord.ui.Button(
-            label="🔁 Loop: On" if loop_on else "🔁 Loop: Off",
-            style=discord.ButtonStyle.success if loop_on else discord.ButtonStyle.secondary,
+        ap_btn = discord.ui.Button(
+            label=f"Autoplay {'On' if ap_on else 'Off'}",
+            style=discord.ButtonStyle.success if ap_on else discord.ButtonStyle.secondary,
             disabled=not self.interactive,
         )
-        ap_btn = discord.ui.Button(
-            label="🔀 Autoplay: On" if ap_on else "🔀 Autoplay: Off",
-            style=discord.ButtonStyle.success if ap_on else discord.ButtonStyle.secondary,
+        loop_btn = discord.ui.Button(
+            label=f"Loop {'On' if loop_on else 'Off'}",
+            style=discord.ButtonStyle.success if loop_on else discord.ButtonStyle.secondary,
             disabled=not self.interactive,
         )
         vol_btn = discord.ui.Button(
@@ -266,162 +305,47 @@ class MusicControllerView(discord.ui.LayoutView):
         )
 
         if self.interactive:
-            loop_btn.callback = self._loop_callback
-            ap_btn.callback   = self._autoplay_callback
-            vol_btn.callback  = self._volume_callback
+            ap_btn.callback   = self.cog.autoplay_toggle_callback
+            loop_btn.callback = self.cog.loop_toggle_callback
+            vol_btn.callback  = self.cog.set_volume_button_callback
 
-        utils.add_item(loop_btn)
         utils.add_item(ap_btn)
+        utils.add_item(loop_btn)
         utils.add_item(vol_btn)
         container.add_item(utils)
 
         self.add_item(container)
 
-    # ── Queue text helper ──────────────────────────────────────────────────
-
-    def _queue_summary(self) -> str:
-        if not self.player or not self.player.current:
-            return "**Queue**\n-# No active session."
-        t     = self.player.current
-        lines = [
-            "**Queue**",
-            f"**Now** · `{_trunc(t.title, 52)}`",
-        ]
-        items = list(self.player.queue)
-        if items:
-            for i, track in enumerate(items[:3], 1):
-                lines.append(f"**Next {i}** · `{_trunc(track.title, 44)}` · `{_fmt_ms(track.length)}`")
-            if len(items) > 3:
-                lines.append(f"-# +{len(items) - 3} more in queue")
-        else:
-            lines.append("-# Queue is empty")
-        return "\n".join(lines)
-
-    # ── Validation helper ──────────────────────────────────────────────────
-
-    async def _validate(self, interaction: discord.Interaction) -> wavelink.Player | None:
-        vc: wavelink.Player | None = interaction.guild.voice_client
-        if not vc:
-            await interaction.response.send_message(
-                embed=discord.Embed(description="❌ The player is not running.", color=discord.Color.red()),
-                ephemeral=True, delete_after=8,
-            )
-            return None
-        if not interaction.user.voice:
-            await interaction.response.send_message(
-                embed=discord.Embed(description="❌ Join a voice channel first.", color=discord.Color.red()),
-                ephemeral=True, delete_after=8,
-            )
-            return None
-        if vc.channel != interaction.user.voice.channel:
-            await interaction.response.send_message(
-                embed=discord.Embed(description="❌ You must be in the same voice channel.", color=discord.Color.red()),
-                ephemeral=True, delete_after=8,
-            )
-            return None
-        return vc
-
-    # ── Button callbacks ───────────────────────────────────────────────────
-
-    async def _pause_callback(self, interaction: discord.Interaction):
-        vc = await self._validate(interaction)
-        if not vc:
-            return
-        await vc.pause(not vc.paused)
-        state = "⏸ Paused" if vc.paused else "▶️ Resumed"
-        await interaction.response.send_message(f"{state}.", ephemeral=True, delete_after=5)
-        await self.cog.send_music_controls(interaction.guild)
-
-    async def _skip_callback(self, interaction: discord.Interaction):
-        vc = await self._validate(interaction)
-        if not vc:
-            return
-        await vc.stop()
-        await interaction.response.send_message("⏭ Skipped.", ephemeral=True, delete_after=5)
-
-    async def _stop_callback(self, interaction: discord.Interaction):
-        vc = await self._validate(interaction)
-        if not vc:
-            return
-        vc.queue.clear()
-        await vc.stop()
-        await vc.disconnect()
-        await interaction.response.send_message("⏹ Stopped and disconnected.", ephemeral=True, delete_after=5)
-        await self.cog.send_music_controls(interaction.guild, end=True)
-
-    async def _loop_callback(self, interaction: discord.Interaction):
-        vc = await self._validate(interaction)
-        if not vc:
-            return
-        if vc.queue.mode == wavelink.QueueMode.loop:
-            vc.queue.mode = wavelink.QueueMode.normal
-            msg = "🔁 Loop **disabled**."
-        else:
-            vc.queue.mode = wavelink.QueueMode.loop
-            msg = "🔁 Loop **enabled**."
-        await interaction.response.send_message(msg, ephemeral=True, delete_after=5)
-        await self.cog.send_music_controls(interaction.guild)
-
-    async def _autoplay_callback(self, interaction: discord.Interaction):
-        vc = await self._validate(interaction)
-        if not vc:
-            return
-        if vc.autoplay == wavelink.AutoPlayMode.disabled:
-            vc.autoplay = wavelink.AutoPlayMode.enabled
-            msg = "🔀 Autoplay **enabled**."
-        else:
-            vc.autoplay = wavelink.AutoPlayMode.disabled
-            msg = "🔀 Autoplay **disabled**."
-        await interaction.response.send_message(msg, ephemeral=True, delete_after=5)
-        await self.cog.send_music_controls(interaction.guild)
-
-    async def _volume_callback(self, interaction: discord.Interaction):
-        vc = await self._validate(interaction)
-        if not vc:
-            return
-        cog = self.cog
-
-        class VolumeModal(discord.ui.Modal, title="Set Volume"):
-            vol_input = discord.ui.TextInput(
-                label="Volume (0–100)",
-                placeholder="80",
-                required=True,
-                max_length=3,
-            )
-
-            async def on_submit(self_, i: discord.Interaction):
-                try:
-                    v = int(self_.vol_input.value)
-                except ValueError:
-                    return await i.response.send_message("❌ Invalid number.", ephemeral=True, delete_after=5)
-                if not 0 <= v <= 100:
-                    return await i.response.send_message("❌ Must be 0–100.", ephemeral=True, delete_after=5)
-                await vc.set_volume(v)
-                await i.response.send_message(f"🔊 Volume set to **{v}%**.", ephemeral=True, delete_after=5)
-                await cog.send_music_controls(i.guild)
-
-        await interaction.response.send_modal(VolumeModal())
-
 
 # ── Main Cog ──────────────────────────────────────────────────────────────────
 
 class MusicCog(commands.Cog, name="Music"):
-    """Music powered by Lavalink with Components v2 controller."""
+    """Music powered by Lavalink with Neroniel Components v2 UI."""
 
-    CONTROLLER_COOLDOWN = 2.0  # seconds
+    CONTROLLER_COOLDOWN_SECONDS = 1.5
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # guild_id (str) → discord.Message
-        self._controllers:   dict[str, discord.Message] = {}
-        self._last_update:   dict[str, datetime.datetime] = {}
-        # guild_id (str) → int (dedicated music channel)
-        self._music_channels: dict[str, int] = {}
+        # guild_id (str) → {channel_id, message_id, default_volume}
+        self._music_data: dict[str, dict] = {}
+        # guild_id (str) → discord.Message  (when no setup channel)
+        self._manual_controller: dict[str, discord.Message] = {}
+        # guild_id (int) → datetime  (button rate-limit)
+        self._controller_cooldown: dict[int, datetime.datetime] = {}
 
-    # ── Lavalink connection ───────────────────────────────────────────────────
+    # ── Startup ───────────────────────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_ready(self):
+        await _db_init()
+        # Load all music settings into memory cache
+        async with aiosqlite.connect(_DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM music_settings") as cur:
+                async for row in cur:
+                    self._music_data[row["guild_id"]] = dict(row)
+
+        # Connect to Lavalink
         try:
             wavelink.Pool.get_node()
             return
@@ -447,90 +371,143 @@ class MusicCog(commands.Cog, name="Music"):
     @commands.Cog.listener()
     async def on_wavelink_track_start(self, payload: wavelink.TrackStartEventPayload):
         player = payload.player
-        if not player or not player.guild:
+        if not player or not getattr(player, "guild", None):
             return
         await self.send_music_controls(player.guild, update_attachments=True)
 
     @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
-        player = payload.player
-        if not player or not player.guild:
-            return
-        if player.autoplay != wavelink.AutoPlayMode.disabled:
-            for _ in range(5):
+        try:
+            player = payload.player
+            guild  = getattr(player, "guild", None)
+            if not player or not guild:
+                return
+
+            if player.autoplay != wavelink.AutoPlayMode.disabled:
+                for _ in range(5):
+                    if player.current:
+                        break
+                    await asyncio.sleep(1)
+                if guild.voice_client:
+                    return await self.send_music_controls(guild, update_attachments=True)
+                return
+
+            if player.queue.is_empty and not player.queue.mode == wavelink.QueueMode.loop:
                 if player.current:
-                    break
-                await asyncio.sleep(1)
-            if player.guild.voice_client:
-                return await self.send_music_controls(player.guild, update_attachments=True)
-            return
-        if player.queue.is_empty and not player.current:
-            await player.disconnect()
-            await self.send_music_controls(player.guild, end=True)
-        else:
-            await self.send_music_controls(player.guild, update_attachments=True)
+                    return
+                await player.disconnect()
+                await self.send_music_controls(guild, end=True)
+            else:
+                try:
+                    next_track = player.queue.get()
+                except wavelink.exceptions.QueueEmpty:
+                    await player.disconnect()
+                    await self.send_music_controls(guild, end=True)
+                    return
+                await player.play(next_track)
+                await self.send_music_controls(guild, update_attachments=True)
+        except Exception:
+            print(f"[Music] Track end error:\n{traceback.format_exc()}")
 
     @commands.Cog.listener()
     async def on_wavelink_inactive_player(self, player: wavelink.Player):
         try:
-            await self.send_music_controls(player.guild, end=True)
+            guild = getattr(player, "guild", None)
+            if guild:
+                await self.send_music_controls(guild, end=True)
             await player.disconnect()
-            print(f"[Music] Disconnected from {player.guild.name} (inactive).")
+            if guild:
+                print(f"[Music] Disconnected from {guild.name} (inactive).")
         except Exception:
             pass
 
-    # ── Controller helpers ────────────────────────────────────────────────────
+    # ── Queue text helper ─────────────────────────────────────────────────────
 
-    def _get_controller_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
-        cid = self._music_channels.get(str(guild.id))
-        return guild.get_channel(cid) if cid else None
+    def _build_queue_summary(self, player: "wavelink.Player | None") -> str:
+        if not player or not player.current:
+            return "**Queue**\n-# No active session right now."
+        lines = [
+            "**Queue**",
+            f"**Now** — `{_trunc(player.current.title, 52)}`",
+        ]
+        items = list(player.queue)
+        if items:
+            for i, track in enumerate(items[:3], 1):
+                lines.append(
+                    f"**Next {i}** — `{_trunc(track.title, 44)}` — `{_fmt_ms(track.length)}`"
+                )
+            if len(items) > 3:
+                lines.append(f"-# +{len(items) - 3} more waiting")
+        else:
+            lines.append("-# Queue is empty")
+        return "\n".join(lines)
+
+    # ── Controller channel resolution ─────────────────────────────────────────
+
+    async def _resolve_controller(
+        self, guild: discord.Guild, command_channel=None
+    ) -> tuple:
+        """Returns (target_channel, controller_message, music_data)."""
+        music_data = self._music_data.get(str(guild.id), {})
+        controller_message = self._manual_controller.get(str(guild.id))
+        target_channel = command_channel
+
+        chan_id = music_data.get("channel_id")
+        if chan_id:
+            ch = guild.get_channel(int(chan_id))
+            if ch:
+                target_channel = ch
+                msg_id = music_data.get("message_id")
+                if msg_id:
+                    try:
+                        controller_message = await ch.fetch_message(int(msg_id))
+                    except Exception:
+                        controller_message = None
+
+        return target_channel, controller_message, music_data
+
+    # ── send_music_controls ───────────────────────────────────────────────────
 
     async def send_music_controls(
         self,
         guild: discord.Guild,
         update_attachments: bool = False,
         end: bool = False,
-        command_channel: discord.abc.Messageable | None = None,
+        command_channel=None,
     ):
-        """Create or edit the now-playing controller message."""
         try:
-            now  = datetime.datetime.now()
-            last = self._last_update.get(str(guild.id))
-            if (
-                last
-                and not end
-                and not update_attachments
-                and (now - last).total_seconds() < self.CONTROLLER_COOLDOWN
-            ):
-                return
-            self._last_update[str(guild.id)] = now
+            target_channel, controller_message, music_data = await self._resolve_controller(
+                guild, command_channel
+            )
+            vc: "wavelink.Player | None" = guild.voice_client
 
-            vc: wavelink.Player | None = guild.voice_client
-
-            target_channel = self._get_controller_channel(guild) or command_channel
-
-            # ── Idle / ended state ─────────────────────────────────────────
+            # ── Idle / ended ───────────────────────────────────────────────
             if end or not vc or not vc.current:
                 idle_view = MusicControllerView(
                     cog=self, guild=guild, player=None,
-                    artwork_url=_DEFAULT_BANNER, interactive=False,
+                    artwork_media=_DEFAULT_BANNER, interactive=False,
                 )
-                existing = self._controllers.get(str(guild.id))
-                if existing:
+                if controller_message:
                     try:
-                        await existing.edit(view=idle_view, attachments=[])
+                        await controller_message.edit(view=idle_view, attachments=[])
                     except (discord.NotFound, discord.HTTPException):
-                        self._controllers.pop(str(guild.id), None)
+                        controller_message = None
                 elif target_channel:
-                    msg = await target_channel.send(view=idle_view)
-                    self._controllers[str(guild.id)] = msg
+                    controller_message = await target_channel.send(view=idle_view)
+
+                if controller_message:
+                    if music_data.get("channel_id"):
+                        await _db_upsert(guild.id, message_id=str(controller_message.id))
+                        self._music_data.setdefault(str(guild.id), {})["message_id"] = str(controller_message.id)
+                    else:
+                        self._manual_controller[str(guild.id)] = controller_message
                 return
 
-            # ── Active state ───────────────────────────────────────────────
-            file         = None
-            artwork_url  = vc.current.artwork or _DEFAULT_BANNER
+            # ── Active ─────────────────────────────────────────────────────
+            file        = None
+            artwork_url = vc.current.artwork or _DEFAULT_BANNER
 
-            if update_attachments or str(guild.id) not in self._controllers:
+            if update_attachments or controller_message is None:
                 buf = _create_music_banner(
                     thumbnail_url=artwork_url,
                     title=vc.current.title,
@@ -539,69 +516,220 @@ class MusicCog(commands.Cog, name="Music"):
                     position_ms=max(0, getattr(vc, "position", 0)),
                 )
                 if buf:
-                    file = discord.File(buf, filename="music_controller.png")
+                    file        = discord.File(buf, filename="music_controller.png")
                     artwork_url = "attachment://music_controller.png"
 
             view = MusicControllerView(
                 cog=self, guild=guild, player=vc,
-                artwork_url=artwork_url, interactive=True,
+                artwork_media=artwork_url, interactive=True,
             )
 
             if not target_channel:
-                existing = self._controllers.get(str(guild.id))
-                if existing:
-                    target_channel = existing.channel
-
-            existing = self._controllers.get(str(guild.id))
-
-            if existing:
-                edit_kwargs: dict = {"view": view}
-                if file:
-                    edit_kwargs["attachments"] = [file]
-                try:
-                    await existing.edit(**edit_kwargs)
+                if controller_message:
+                    target_channel = controller_message.channel
+                else:
+                    print(f"[Music] No target channel for {guild.name}")
                     return
-                except discord.NotFound:
-                    self._controllers.pop(str(guild.id), None)
-                except Exception:
-                    self._controllers.pop(str(guild.id), None)
 
-            if target_channel:
-                msg = await target_channel.send(
-                    view=view,
-                    file=file if file else discord.utils.MISSING,
-                )
-                self._controllers[str(guild.id)] = msg
+            if controller_message:
+                edit_kw: dict = {"view": view}
+                if file:
+                    edit_kw["attachments"] = [file]
+                try:
+                    await controller_message.edit(**edit_kw)
+                except (discord.NotFound, discord.HTTPException):
+                    controller_message = None
+
+            if not controller_message:
+                send_kw: dict = {"view": view}
+                if file:
+                    send_kw["file"] = file
+                controller_message = await target_channel.send(**send_kw)
+
+            if music_data.get("channel_id"):
+                await _db_upsert(guild.id, message_id=str(controller_message.id))
+                self._music_data.setdefault(str(guild.id), {})["message_id"] = str(controller_message.id)
+            else:
+                self._manual_controller[str(guild.id)] = controller_message
 
         except Exception:
             print(f"[Music] Controller error:\n{traceback.format_exc()}")
 
-    # ── Search helper ─────────────────────────────────────────────────────────
+    # ── Button interaction validator ──────────────────────────────────────────
 
-    async def _search(self, query: str):
-        is_url = bool(_URL_RE.match(query.strip()))
-        attempts = [query] if is_url else [
-            f"ytsearch:{query}",
-            f"scsearch:{query}",
-            query,
-        ]
-        for attempt in attempts:
-            try:
-                results = await wavelink.Playable.search(attempt)
-                if results:
-                    return results
-            except Exception as exc:
-                print(f"[Music] Search '{attempt}' failed: {exc}")
-        return None
+    async def _validate_controller_interaction(
+        self, interaction: discord.Interaction
+    ) -> "wavelink.Player | None":
+        vc: "wavelink.Player | None" = interaction.guild.voice_client
+        if not vc:
+            await interaction.response.send_message(
+                embed=discord.Embed(description="The player is offline right now.", color=discord.Color.red()),
+                ephemeral=True, delete_after=8,
+            )
+            return None
+        if not interaction.user.voice:
+            await interaction.response.send_message(
+                embed=discord.Embed(description="Join a voice channel to use the controller.", color=discord.Color.red()),
+                ephemeral=True, delete_after=8,
+            )
+            return None
+        if vc.channel != interaction.user.voice.channel:
+            await interaction.response.send_message(
+                embed=discord.Embed(description="You need to be in the same voice channel.", color=discord.Color.red()),
+                ephemeral=True, delete_after=8,
+            )
+            return None
+
+        last = self._controller_cooldown.get(interaction.guild.id)
+        if last and datetime.datetime.now() - last < datetime.timedelta(seconds=self.CONTROLLER_COOLDOWN_SECONDS):
+            await interaction.response.send_message(
+                embed=discord.Embed(description="Controller is refreshing — try again in a moment.", color=discord.Color.orange()),
+                ephemeral=True, delete_after=4,
+            )
+            return None
+
+        self._controller_cooldown[interaction.guild.id] = datetime.datetime.now()
+        return vc
+
+    # ── Button callbacks (cog methods, assigned in _build) ────────────────────
+
+    async def pause_resume_button_callback(self, interaction: discord.Interaction):
+        try:
+            vc = await self._validate_controller_interaction(interaction)
+            if not vc:
+                return
+            await interaction.response.defer()
+            if vc.paused:
+                await vc.pause(False)
+                await self.send_music_controls(interaction.guild, update_attachments=True)
+                await interaction.followup.send("▶️ Playback resumed.", ephemeral=True)
+            else:
+                await vc.pause(True)
+                await self.send_music_controls(interaction.guild, update_attachments=True)
+                await interaction.followup.send("⏸ Playback paused.", ephemeral=True)
+        except Exception:
+            print(f"[Music] pause_resume error:\n{traceback.format_exc()}")
+
+    async def skip_button_callback(self, interaction: discord.Interaction):
+        try:
+            vc = await self._validate_controller_interaction(interaction)
+            if not vc:
+                return
+            await interaction.response.defer()
+            if vc.queue or vc.autoplay != wavelink.AutoPlayMode.disabled:
+                await vc.skip(force=True)
+                await interaction.followup.send("⏭ Skipped.", ephemeral=True)
+            else:
+                await interaction.followup.send("Nothing left in queue to skip into.", ephemeral=True)
+        except Exception:
+            print(f"[Music] skip error:\n{traceback.format_exc()}")
+
+    async def stop_button_callback(self, interaction: discord.Interaction):
+        try:
+            vc = await self._validate_controller_interaction(interaction)
+            if not vc:
+                return
+            await interaction.response.defer()
+            vc.queue.clear()
+            await vc.stop()
+            await vc.disconnect()
+            await self.send_music_controls(interaction.guild, end=True)
+            await interaction.followup.send("⏹ Player stopped and disconnected.", ephemeral=True)
+        except Exception:
+            print(f"[Music] stop error:\n{traceback.format_exc()}")
+
+    async def loop_toggle_callback(self, interaction: discord.Interaction):
+        try:
+            vc = await self._validate_controller_interaction(interaction)
+            if not vc:
+                return
+            await interaction.response.defer()
+            if vc.queue.mode == wavelink.QueueMode.loop:
+                vc.queue.mode = wavelink.QueueMode.normal
+                await self.send_music_controls(interaction.guild, update_attachments=True)
+                await interaction.followup.send("🔁 Loop **disabled**.", ephemeral=True)
+            else:
+                vc.queue.mode = wavelink.QueueMode.loop
+                await self.send_music_controls(interaction.guild, update_attachments=True)
+                await interaction.followup.send("🔁 Loop **enabled**.", ephemeral=True)
+        except Exception:
+            print(f"[Music] loop error:\n{traceback.format_exc()}")
+
+    async def autoplay_toggle_callback(self, interaction: discord.Interaction):
+        try:
+            vc = await self._validate_controller_interaction(interaction)
+            if not vc:
+                return
+            await interaction.response.defer()
+            if vc.autoplay == wavelink.AutoPlayMode.disabled:
+                vc.autoplay = wavelink.AutoPlayMode.enabled
+                await self.send_music_controls(interaction.guild, update_attachments=True)
+                await interaction.followup.send("🔀 Autoplay **enabled**.", ephemeral=True)
+            else:
+                vc.autoplay = wavelink.AutoPlayMode.disabled
+                await self.send_music_controls(interaction.guild, update_attachments=True)
+                await interaction.followup.send("🔀 Autoplay **disabled**.", ephemeral=True)
+        except Exception:
+            print(f"[Music] autoplay error:\n{traceback.format_exc()}")
+
+    async def set_volume_button_callback(self, interaction: discord.Interaction):
+        try:
+            vc = await self._validate_controller_interaction(interaction)
+            if not vc:
+                return
+
+            cog = self
+
+            class VolumeModal(discord.ui.Modal, title="Set Volume"):
+                new_volume_field = discord.ui.TextInput(
+                    label="Volume (0–100)",
+                    min_length=1,
+                    max_length=3,
+                    required=True,
+                    default=str(vc.volume),
+                    placeholder="Enter volume (0-100)",
+                    style=discord.TextStyle.short,
+                )
+
+                async def on_submit(self_, i: discord.Interaction):
+                    try:
+                        iv: "wavelink.Player | None" = i.guild.voice_client
+                        if not iv:
+                            return await i.response.send_message(
+                                embed=discord.Embed(description="The bot disconnected.", color=discord.Color.red()),
+                                ephemeral=True, delete_after=8,
+                            )
+                        try:
+                            volume = int(self_.new_volume_field.value)
+                        except ValueError:
+                            return await i.response.send_message(
+                                embed=discord.Embed(description="Invalid volume value.", color=discord.Color.red()),
+                                ephemeral=True, delete_after=8,
+                            )
+                        if not 0 <= volume <= 100:
+                            return await i.response.send_message(
+                                embed=discord.Embed(description="Volume must be between 0 and 100.", color=discord.Color.red()),
+                                ephemeral=True, delete_after=8,
+                            )
+                        await i.response.defer()
+                        await iv.set_volume(volume)
+                        await cog.send_music_controls(i.guild, update_attachments=True)
+                        await i.followup.send(f"🔊 Volume set to **{volume}%**.", ephemeral=True)
+                    except Exception:
+                        print(f"[Music] VolumeModal error:\n{traceback.format_exc()}")
+
+            await interaction.response.send_modal(VolumeModal())
+        except Exception:
+            print(f"[Music] set_volume error:\n{traceback.format_exc()}")
 
     # ── VC connect helper ─────────────────────────────────────────────────────
 
-    async def _ensure_connected(self, ctx: commands.Context) -> wavelink.Player | None:
+    async def _ensure_connected(self, ctx: commands.Context) -> "wavelink.Player | None":
         if not ctx.author.voice:
             await ctx.reply("❌ Join a voice channel first.", delete_after=10)
             return None
         dest = ctx.author.voice.channel
-        vc: wavelink.Player | None = ctx.guild.voice_client
+        vc: "wavelink.Player | None" = ctx.guild.voice_client
         if not vc:
             try:
                 vc = await dest.connect(cls=wavelink.Player, self_deaf=True)
@@ -616,25 +744,90 @@ class MusicCog(commands.Cog, name="Music"):
                 else:
                     await ctx.reply("❌ I'm already playing in another voice channel.", delete_after=10)
                     return None
-        if ctx.author.voice.channel != vc.channel:
-            await ctx.reply("❌ Please join my voice channel.", delete_after=10)
-            return None
         return vc
 
-    # ── VC check helper ───────────────────────────────────────────────────────
+    # ── Search helper ─────────────────────────────────────────────────────────
 
-    def _vc_error(self, ctx: commands.Context, vc: wavelink.Player | None) -> str | None:
-        if not vc:
-            return "❌ I'm not in a voice channel."
-        if not ctx.author.voice:
-            return "❌ You need to be in a voice channel."
-        if vc.channel != ctx.author.voice.channel:
-            return "❌ You must be in the same voice channel as me."
+    async def _search(self, query: str):
+        is_url = bool(_URL_RE.match(query.strip()))
+        attempts = [query] if is_url else [f"ytsearch:{query}", f"scsearch:{query}", query]
+        for attempt in attempts:
+            try:
+                results = await wavelink.Playable.search(attempt)
+                if results:
+                    return results
+            except Exception as exc:
+                print(f"[Music] Search '{attempt}' failed: {exc}")
         return None
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # COMMANDS
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── on_message — dedicated music channel ──────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+        music_data = self._music_data.get(str(message.guild.id), {})
+        chan_id = music_data.get("channel_id")
+        if not chan_id or message.channel.id != int(chan_id):
+            return
+        await self._music_channel_play(message)
+
+    async def _music_channel_play(self, message: discord.Message):
+        try:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+            if not message.author.voice:
+                return await message.channel.send(
+                    "❌ You need to be in a voice channel.", delete_after=10
+                )
+
+            vc: "wavelink.Player | None" = message.guild.voice_client
+            if not vc:
+                try:
+                    vc = await message.author.voice.channel.connect(
+                        cls=wavelink.Player, timeout=60, self_deaf=True
+                    )
+                    vc.inactive_timeout = 300
+                except Exception:
+                    return await message.channel.send("❌ Failed to connect to voice channel.", delete_after=5)
+            else:
+                if vc.channel != message.author.voice.channel:
+                    if not vc.current:
+                        await vc.move_to(message.author.voice.channel)
+                    else:
+                        return await message.channel.send(
+                            "❌ I'm already playing in another voice channel.", delete_after=5
+                        )
+
+            search = message.content.strip()
+            if not search:
+                return await message.channel.send("❌ Please provide a song name or URL.", delete_after=5)
+
+            results = await self._search(search)
+            if not results:
+                return await message.channel.send("❌ No results found.", delete_after=5)
+
+            track = results[0]
+            music_data = self._music_data.get(str(message.guild.id), {})
+            default_vol = int(music_data.get("default_volume") or 80)
+
+            if not vc.current:
+                await vc.play(track, volume=default_vol)
+                await self.send_music_controls(message.guild, update_attachments=True)
+                await message.channel.send(f"✅ Playing: **{track.title}**", delete_after=5)
+            else:
+                if len(vc.queue) >= 50:
+                    return await message.channel.send("❌ Queue is full (50 tracks max).", delete_after=5)
+                await vc.queue.put_wait(track)
+                await self.send_music_controls(message.guild)
+                await message.channel.send(
+                    f"📋 Added to queue: **{track.title}**", delete_after=5
+                )
+        except Exception:
+            print(f"[Music] music_channel_play error:\n{traceback.format_exc()}")
 
     # ── /play ─────────────────────────────────────────────────────────────────
 
@@ -643,50 +836,57 @@ class MusicCog(commands.Cog, name="Music"):
     @commands.cooldown(rate=5, per=30, type=commands.BucketType.user)
     @commands.guild_only()
     async def play(self, ctx: commands.Context, *, search: str):
-        if ctx.interaction:
-            await ctx.defer()
+        try:
+            if ctx.interaction:
+                try:
+                    await ctx.defer()
+                except discord.errors.NotFound:
+                    return
 
-        setup_chan_id = self._music_channels.get(str(ctx.guild.id))
-        if setup_chan_id and ctx.channel.id != setup_chan_id:
-            return await ctx.reply(
-                embed=discord.Embed(
-                    description=f"🎵 Please use <#{setup_chan_id}> to control music.",
-                    color=discord.Color.red(),
-                ),
-                delete_after=10,
-            )
+            # If a dedicated music channel is configured, redirect there
+            music_data = self._music_data.get(str(ctx.guild.id), {})
+            chan_id = music_data.get("channel_id")
+            if chan_id:
+                ch = ctx.guild.get_channel(int(chan_id))
+                if ch and ctx.channel.id != int(chan_id):
+                    return await ctx.reply(
+                        embed=discord.Embed(
+                            description=f"🎵 Send song names directly in <#{chan_id}> to play music.\nUse `/music reset` to remove the setup.",
+                            color=discord.Color.red(),
+                        )
+                    )
 
-        vc = await self._ensure_connected(ctx)
-        if not vc:
-            return
+            vc = await self._ensure_connected(ctx)
+            if not vc:
+                return
 
-        results = await self._search(search)
-        if results is None:
-            return await ctx.reply("❌ Search failed — the music server may be offline.", delete_after=15)
-        if not results:
-            return await ctx.reply("❌ No results found. Try a different search term.", delete_after=10)
+            results = await self._search(search)
+            if not results:
+                return await ctx.reply("❌ No results found. Try a different search term.", delete_after=10)
 
-        if isinstance(results, wavelink.Playlist):
-            tracks = results.tracks
-            for t in tracks:
-                t.extras = {"requester": ctx.author.id}
-            await vc.queue.put_wait(tracks)  # type: ignore[arg-type]
-            await ctx.reply(f"📋 Added playlist **{results.name}** ({len(tracks)} tracks) to the queue.")
-            if not vc.current:
-                await vc.play(vc.queue.get(), volume=80)
-            await self.send_music_controls(ctx.guild, update_attachments=True, command_channel=ctx.channel)
-        else:
-            track: wavelink.Playable = results[0]
-            track.extras = {"requester": ctx.author.id}
-            if vc.current:
-                if len(vc.queue) >= 50:
-                    return await ctx.reply("❌ Queue is full (50 tracks max).", delete_after=10)
-                await vc.queue.put_wait(track)
-                await ctx.reply(f"📋 Added **{_trunc(track.title)}** to the queue (position {len(vc.queue)}).")
-                await self.send_music_controls(ctx.guild, command_channel=ctx.channel)
+            default_vol = int(music_data.get("default_volume") or 80)
+
+            if isinstance(results, wavelink.Playlist):
+                tracks = results.tracks
+                await vc.queue.put_wait(tracks)
+                await ctx.reply(f"📋 Added playlist **{results.name}** ({len(tracks)} tracks) to the queue.")
+                if not vc.current:
+                    await vc.play(vc.queue.get(), volume=default_vol)
+                await self.send_music_controls(ctx.guild, update_attachments=True, command_channel=ctx.channel)
             else:
-                await vc.play(track, volume=80)
-                await ctx.reply(f"▶️ Now playing **{_trunc(track.title)}**.")
+                track = results[0]
+                if not vc.current:
+                    await vc.play(track, volume=default_vol)
+                    await ctx.reply(f"▶️ Now playing **{_trunc(track.title)}**.")
+                    await self.send_music_controls(ctx.guild, update_attachments=True, command_channel=ctx.channel)
+                else:
+                    if len(vc.queue) >= 50:
+                        return await ctx.reply("❌ Queue is full (50 tracks max).", delete_after=10)
+                    await vc.queue.put_wait(track)
+                    await ctx.reply(f"📋 Added **{_trunc(track.title)}** to the queue (position {len(vc.queue)}).")
+                    await self.send_music_controls(ctx.guild, command_channel=ctx.channel)
+        except Exception:
+            print(f"[Music] play error:\n{traceback.format_exc()}")
 
     # ── /pause ────────────────────────────────────────────────────────────────
 
@@ -695,16 +895,20 @@ class MusicCog(commands.Cog, name="Music"):
     @commands.guild_only()
     async def pause(self, ctx: commands.Context):
         if ctx.interaction:
-            await ctx.defer()
-        vc: wavelink.Player | None = ctx.guild.voice_client
-        err = self._vc_error(ctx, vc)
-        if err:
-            return await ctx.reply(err, delete_after=10)
+            try:
+                await ctx.defer()
+            except discord.errors.NotFound:
+                return
+        vc: "wavelink.Player | None" = ctx.guild.voice_client
+        if not vc:
+            return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
+        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
+            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
         if vc.paused:
             return await ctx.reply("⏸ Already paused.", delete_after=8)
         await vc.pause(True)
+        await self.send_music_controls(ctx.guild)
         await ctx.reply("⏸ Paused.")
-        await self.send_music_controls(ctx.guild, command_channel=ctx.channel)
 
     # ── /resume ───────────────────────────────────────────────────────────────
 
@@ -713,16 +917,20 @@ class MusicCog(commands.Cog, name="Music"):
     @commands.guild_only()
     async def resume(self, ctx: commands.Context):
         if ctx.interaction:
-            await ctx.defer()
-        vc: wavelink.Player | None = ctx.guild.voice_client
-        err = self._vc_error(ctx, vc)
-        if err:
-            return await ctx.reply(err, delete_after=10)
+            try:
+                await ctx.defer()
+            except discord.errors.NotFound:
+                return
+        vc: "wavelink.Player | None" = ctx.guild.voice_client
+        if not vc:
+            return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
+        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
+            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
         if not vc.paused:
             return await ctx.reply("▶️ Already playing.", delete_after=8)
         await vc.pause(False)
+        await self.send_music_controls(ctx.guild)
         await ctx.reply("▶️ Resumed.")
-        await self.send_music_controls(ctx.guild, command_channel=ctx.channel)
 
     # ── /skip ─────────────────────────────────────────────────────────────────
 
@@ -731,306 +939,501 @@ class MusicCog(commands.Cog, name="Music"):
     @commands.guild_only()
     async def skip(self, ctx: commands.Context):
         if ctx.interaction:
-            await ctx.defer()
-        vc: wavelink.Player | None = ctx.guild.voice_client
-        err = self._vc_error(ctx, vc)
-        if err:
-            return await ctx.reply(err, delete_after=10)
-        if not vc.current:
-            return await ctx.reply("❌ Nothing is playing.", delete_after=8)
+            try:
+                await ctx.defer()
+            except discord.errors.NotFound:
+                return
+        vc: "wavelink.Player | None" = ctx.guild.voice_client
+        if not vc:
+            return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
+        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
+            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
+        if not vc.playing and not vc.paused:
+            return await ctx.reply("❌ No track is currently playing.", delete_after=10)
         await vc.stop()
         await ctx.reply("⏭ Skipped.")
 
-    # ── /stop ─────────────────────────────────────────────────────────────────
-
-    @commands.hybrid_command(name="stop", description="Stop music and disconnect.", with_app_command=True)
-    @commands.cooldown(rate=3, per=30, type=commands.BucketType.user)
-    @commands.guild_only()
-    async def stop(self, ctx: commands.Context):
-        if ctx.interaction:
-            await ctx.defer()
-        vc: wavelink.Player | None = ctx.guild.voice_client
-        err = self._vc_error(ctx, vc)
-        if err:
-            return await ctx.reply(err, delete_after=10)
-        vc.queue.clear()
-        await vc.stop()
-        await vc.disconnect()
-        await ctx.reply("⏹ Stopped and disconnected.")
-        await self.send_music_controls(ctx.guild, end=True)
-
     # ── /loop ─────────────────────────────────────────────────────────────────
 
-    @commands.hybrid_command(name="loop", description="Toggle looping the current track.", with_app_command=True)
+    @commands.hybrid_command(name="loop", description="Toggle loop mode.", with_app_command=True)
     @commands.cooldown(rate=5, per=30, type=commands.BucketType.user)
     @commands.guild_only()
     async def loop(self, ctx: commands.Context):
         if ctx.interaction:
-            await ctx.defer()
-        vc: wavelink.Player | None = ctx.guild.voice_client
-        err = self._vc_error(ctx, vc)
-        if err:
-            return await ctx.reply(err, delete_after=10)
+            try:
+                await ctx.defer()
+            except discord.errors.NotFound:
+                return
+        vc: "wavelink.Player | None" = ctx.guild.voice_client
+        if not vc:
+            return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
+        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
+            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
         if vc.queue.mode == wavelink.QueueMode.loop:
             vc.queue.mode = wavelink.QueueMode.normal
-            await ctx.reply("🔁 Loop **disabled**.")
+            await ctx.reply("✅ Looping **disabled**.")
         else:
             vc.queue.mode = wavelink.QueueMode.loop
-            await ctx.reply("🔁 Loop **enabled**.")
-        await self.send_music_controls(ctx.guild, command_channel=ctx.channel)
+            await ctx.reply("✅ Looping **enabled**.")
+        await self.send_music_controls(ctx.guild)
 
     # ── /autoplay ─────────────────────────────────────────────────────────────
 
-    @commands.hybrid_command(name="autoplay", description="Toggle autoplay of related tracks.", with_app_command=True)
+    @commands.hybrid_command(name="autoplay", description="Toggle autoplay mode.", with_app_command=True)
     @commands.cooldown(rate=5, per=30, type=commands.BucketType.user)
     @commands.guild_only()
     async def autoplay(self, ctx: commands.Context):
         if ctx.interaction:
-            await ctx.defer()
-        vc: wavelink.Player | None = ctx.guild.voice_client
-        err = self._vc_error(ctx, vc)
-        if err:
-            return await ctx.reply(err, delete_after=10)
+            try:
+                await ctx.defer()
+            except discord.errors.NotFound:
+                return
+        vc: "wavelink.Player | None" = ctx.guild.voice_client
+        if not vc:
+            return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
+        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
+            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
         if vc.autoplay == wavelink.AutoPlayMode.disabled:
             vc.autoplay = wavelink.AutoPlayMode.enabled
-            await ctx.reply("🔀 Autoplay **enabled**.")
+            await ctx.reply("✅ Autoplay **enabled**.")
         else:
             vc.autoplay = wavelink.AutoPlayMode.disabled
-            await ctx.reply("🔀 Autoplay **disabled**.")
-        await self.send_music_controls(ctx.guild, command_channel=ctx.channel)
+            await ctx.reply("✅ Autoplay **disabled**.")
+        await self.send_music_controls(ctx.guild)
+
+    # ── /stop ─────────────────────────────────────────────────────────────────
+
+    @commands.hybrid_command(name="stop", description="Stop the player and disconnect.", with_app_command=True)
+    @commands.cooldown(rate=5, per=30, type=commands.BucketType.user)
+    @commands.guild_only()
+    async def stop(self, ctx: commands.Context):
+        if ctx.interaction:
+            try:
+                await ctx.defer()
+            except discord.errors.NotFound:
+                return
+        vc: "wavelink.Player | None" = ctx.guild.voice_client
+        if not vc:
+            # Try forcefully disconnecting if somehow stuck
+            if ctx.guild.me.voice:
+                try:
+                    await ctx.guild.me.move_to(None)
+                    return await ctx.reply("✅ Disconnected.", delete_after=10)
+                except Exception:
+                    pass
+            return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
+        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
+            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
+        vc.queue.clear()
+        await vc.stop()
+        await vc.disconnect()
+        await self.send_music_controls(ctx.guild, end=True)
+        await ctx.reply("⏹ Player stopped and disconnected.", delete_after=10)
+
+    # ── /current (/nowplaying) ────────────────────────────────────────────────
+
+    @commands.hybrid_command(name="current", aliases=["nowplaying", "np"], description="Show the current track.", with_app_command=True)
+    @commands.cooldown(rate=5, per=30, type=commands.BucketType.user)
+    @commands.guild_only()
+    async def current(self, ctx: commands.Context):
+        if ctx.interaction:
+            try:
+                await ctx.defer()
+            except discord.errors.NotFound:
+                return
+        vc: "wavelink.Player | None" = ctx.guild.voice_client
+        if not vc or not vc.current:
+            return await ctx.reply("❌ No track is currently playing.", delete_after=10)
+        await ctx.reply(
+            f"{'⏸️' if vc.paused else '▶️'} **{vc.current.title}** by `{vc.current.author}` "
+            f"— `{_fmt_ms(max(0, getattr(vc, 'position', 0)))} / {_fmt_ms(vc.current.length)}`"
+        )
 
     # ── /volume ───────────────────────────────────────────────────────────────
 
-    @commands.hybrid_command(name="volume", aliases=["vol"], description="Get or set the player volume (0–100).", with_app_command=True)
-    @app_commands.describe(level="Volume level 0–100 (omit to check current)")
+    @commands.hybrid_command(name="volume", aliases=["vol", "v"], description="Get or set the volume.", with_app_command=True)
+    @app_commands.describe(volume="Volume (0-100), leave blank to check current")
     @commands.cooldown(rate=5, per=30, type=commands.BucketType.user)
     @commands.guild_only()
-    async def volume(self, ctx: commands.Context, level: int | None = None):
+    async def volume(self, ctx: commands.Context, volume: int = None):
         if ctx.interaction:
-            await ctx.defer()
-        vc: wavelink.Player | None = ctx.guild.voice_client
-        err = self._vc_error(ctx, vc)
-        if err:
-            return await ctx.reply(err, delete_after=10)
-        if level is None:
+            try:
+                await ctx.defer()
+            except discord.errors.NotFound:
+                return
+        vc: "wavelink.Player | None" = ctx.guild.voice_client
+        if not vc:
+            return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
+        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
+            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
+        if volume is None:
             return await ctx.reply(f"🔊 Current volume: **{vc.volume}%**")
-        if not 0 <= level <= 100:
-            return await ctx.reply("❌ Volume must be between **0** and **100**.", delete_after=10)
-        await vc.set_volume(level)
-        await ctx.reply(f"🔊 Volume set to **{level}%**.")
-        await self.send_music_controls(ctx.guild, command_channel=ctx.channel)
-
-    # ── /nowplaying ───────────────────────────────────────────────────────────
-
-    @commands.hybrid_command(name="nowplaying", aliases=["np"], description="Show the currently playing track.", with_app_command=True)
-    @commands.cooldown(rate=5, per=30, type=commands.BucketType.user)
-    @commands.guild_only()
-    async def nowplaying(self, ctx: commands.Context):
-        if ctx.interaction:
-            await ctx.defer()
-        vc: wavelink.Player | None = ctx.guild.voice_client
-        if not vc or not vc.current:
-            return await ctx.reply("❌ Nothing is currently playing.", delete_after=10)
-        t   = vc.current
-        pos = max(0, getattr(vc, "position", 0))
-        embed = discord.Embed(
-            title=f"▶️ {'Paused' if vc.paused else 'Playing'}",
-            description=f"### [{_trunc(t.title, 64)}]({t.uri})\n**{_trunc(t.author, 48)}**",
-            color=discord.Color.orange() if vc.paused else discord.Color.green(),
-        )
-        embed.add_field(name="Position", value=f"`{_fmt_ms(pos)} / {_fmt_ms(t.length)}`", inline=True)
-        embed.add_field(name="Volume",   value=f"`{vc.volume}%`", inline=True)
-        loop = "🔁 Loop On" if vc.queue.mode == wavelink.QueueMode.loop else "Loop Off"
-        ap   = "🔀 Autoplay On" if vc.autoplay != wavelink.AutoPlayMode.disabled else "Autoplay Off"
-        embed.add_field(name="Modes", value=f"{loop} · {ap}", inline=False)
-        if t.artwork:
-            embed.set_thumbnail(url=t.artwork)
-        await ctx.reply(embed=embed)
+        if not 0 <= volume <= 100:
+            return await ctx.reply("❌ Volume must be between 0 and 100.", delete_after=10)
+        await vc.set_volume(volume)
+        filled = volume // 10
+        bar = "█" * filled + "░" * (10 - filled)
+        await ctx.reply(f"🔊 Volume set to **{volume}%**\n`{bar}`")
+        await self.send_music_controls(ctx.guild, update_attachments=True)
 
     # ── /queue ────────────────────────────────────────────────────────────────
 
-    @commands.hybrid_command(name="queue", aliases=["q"], description="Show the current track queue.", with_app_command=True)
+    @commands.hybrid_command(name="queue", aliases=["q", "tracks"], description="Show the queue.", with_app_command=True)
     @commands.cooldown(rate=5, per=30, type=commands.BucketType.user)
     @commands.guild_only()
-    async def queue_cmd(self, ctx: commands.Context):
-        if ctx.interaction:
-            await ctx.defer()
-        vc: wavelink.Player | None = ctx.guild.voice_client
-        if not vc or not vc.current:
-            return await ctx.reply("❌ Nothing is playing.", delete_after=10)
+    async def queue(self, ctx: commands.Context):
+        try:
+            if ctx.interaction:
+                try:
+                    await ctx.defer()
+                except discord.errors.NotFound:
+                    return
 
-        embed = discord.Embed(title="🎵 Track Queue", color=discord.Color.blurple())
-        pos    = max(0, getattr(vc, "position", 0))
-        status = "⏸" if vc.paused else "▶️"
-        embed.add_field(
-            name=f"{status} Now Playing",
-            value=f"[{_trunc(vc.current.title)}]({vc.current.uri})\n`{_fmt_ms(pos)} / {_fmt_ms(vc.current.length)}`",
-            inline=False,
-        )
+            vc: "wavelink.Player | None" = ctx.guild.voice_client
+            if not vc:
+                return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
 
-        items = list(vc.queue)
+            async def build_embed():
+                embed = discord.Embed(title="🎵 Track Queue", description="", color=discord.Color.dark_theme())
+                if vc.current:
+                    title = _trunc(vc.current.title, 50)
+                    icon  = "⏸️" if vc.paused else "▶️"
+                    embed.description += f"**{icon} 1. {title}** — `{_fmt_ms(vc.current.length)}`\n"
+                for i, track in enumerate(vc.queue, start=2):
+                    embed.description += f"**🎵 {i}. {_trunc(track.title, 50)}** — `{_fmt_ms(track.length)}`\n"
+                if not vc.current and vc.queue.is_empty:
+                    embed.description = "Queue is empty."
+                return embed
 
-        # Interactive select to remove tracks
-        async def make_view(disabled: bool = False) -> discord.ui.View:
-            view = discord.ui.View(timeout=60)
-            options = [
-                discord.SelectOption(
-                    label=_trunc(t.title, 50),
-                    value=str(i),
-                    description=f"Length: {_fmt_ms(t.length)}",
-                )
-                for i, t in enumerate(items[:25])
-            ]
-            if options:
-                sel = discord.ui.Select(placeholder="Select a track to remove", options=options, disabled=disabled)
+            timeout_time = 60
+            cancelled = False
 
-                async def sel_cb(interaction: discord.Interaction):
-                    if interaction.user.id != ctx.author.id:
-                        return await interaction.response.send_message("❌ Not your queue view.", ephemeral=True, delete_after=5)
-                    idx = int(interaction.data["values"][0])
+            async def build_view(disabled=False):
+                nonlocal timeout_time
+                timeout_time = 60
+                view = discord.ui.View()
+                options = []
+                for i, track in enumerate(vc.queue):
+                    options.append(discord.SelectOption(
+                        label=_trunc(track.title, 50),
+                        value=str(i),
+                        description=f"Length: {_fmt_ms(track.length)}",
+                        emoji="🎵",
+                    ))
+                if options:
+                    sel = discord.ui.Select(
+                        placeholder="Select a track to remove from queue",
+                        options=options[:25],
+                    )
+
+                    async def sel_callback(interaction: discord.Interaction):
+                        if interaction.user.id != ctx.author.id:
+                            return await interaction.response.send_message(
+                                "❌ You can't use this.", ephemeral=True, delete_after=5
+                            )
+                        await interaction.response.defer()
+                        idx = int(interaction.data["values"][0])
+                        if idx < len(list(vc.queue)):
+                            vc.queue.delete(idx)
+                        await msg.edit(embed=await build_embed(), view=await build_view())
+
+                    sel.callback = sel_callback
+                    if not disabled:
+                        view.add_item(sel)
+                return view
+
+            msg = await ctx.send(embed=await build_embed(), view=await build_view())
+
+            while not cancelled:
+                timeout_time -= 1
+                if timeout_time <= 0:
                     try:
-                        vc.queue.delete(idx)
-                        items.pop(idx)
+                        await msg.edit(view=await build_view(disabled=True))
                     except Exception:
                         pass
-                    await interaction.response.defer()
-                    new_embed = embed.copy()
-                    new_embed.clear_fields()
-                    new_embed.add_field(
-                        name=f"{status} Now Playing",
-                        value=f"[{_trunc(vc.current.title)}]({vc.current.uri})" if vc.current else "—",
-                        inline=False,
-                    )
-                    if items:
-                        lines = [f"`{i+1}.` {_trunc(t.title, 48)} — `{_fmt_ms(t.length)}`" for i, t in enumerate(items[:10])]
-                        if len(items) > 10:
-                            lines.append(f"*…and {len(items)-10} more*")
-                        new_embed.add_field(name="Up Next", value="\n".join(lines), inline=False)
-                    await interaction.message.edit(embed=new_embed, view=await make_view())
+                    break
+                await asyncio.sleep(1)
 
-                sel.callback = sel_cb
-                view.add_item(sel)
-            return view
-
-        if items:
-            lines = [f"`{i+1}.` [{_trunc(t.title, 48)}]({t.uri}) — `{_fmt_ms(t.length)}`" for i, t in enumerate(items[:10])]
-            if len(items) > 10:
-                lines.append(f"*…and {len(items)-10} more*")
-            embed.add_field(name="Up Next", value="\n".join(lines), inline=False)
-        else:
-            embed.add_field(name="Up Next", value="*Queue is empty*", inline=False)
-
-        await ctx.reply(embed=embed, view=await make_view())
+        except Exception:
+            print(f"[Music] queue error:\n{traceback.format_exc()}")
 
     # ── /seek ─────────────────────────────────────────────────────────────────
 
-    @commands.hybrid_command(name="seek", description="Seek to a position in the current track.", with_app_command=True)
-    @app_commands.describe(seconds="Position in seconds (e.g. 90 = 1m 30s)")
+    @commands.hybrid_command(name="seek", description="Seek to a position in the current track (seconds).", with_app_command=True)
+    @app_commands.describe(seconds="Position in seconds")
     @commands.cooldown(rate=5, per=30, type=commands.BucketType.user)
     @commands.guild_only()
     async def seek(self, ctx: commands.Context, seconds: int):
         if ctx.interaction:
-            await ctx.defer()
-        vc: wavelink.Player | None = ctx.guild.voice_client
-        err = self._vc_error(ctx, vc)
-        if err:
-            return await ctx.reply(err, delete_after=10)
-        if not vc.current:
-            return await ctx.reply("❌ Nothing is playing.", delete_after=10)
+            try:
+                await ctx.defer()
+            except discord.errors.NotFound:
+                return
+        vc: "wavelink.Player | None" = ctx.guild.voice_client
+        if not vc or not vc.current:
+            return await ctx.reply("❌ No track is currently playing.", delete_after=10)
+        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
+            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
         ms = seconds * 1000
-        if not (0 <= ms <= vc.current.length):
-            return await ctx.reply(
-                f"❌ Must be between 0 and {vc.current.length // 1000} seconds.", delete_after=10
-            )
+        if not 0 <= ms <= vc.current.length:
+            return await ctx.reply(f"❌ Seek position must be between 0 and {_fmt_ms(vc.current.length)}.", delete_after=10)
         await vc.seek(ms)
-        await ctx.reply(f"⏩ Seeked to `{_fmt_ms(ms)}`.")
-        await self.send_music_controls(ctx.guild, update_attachments=True, command_channel=ctx.channel)
+        await ctx.reply(f"⏩ Seeked to **{_fmt_ms(ms)}**.")
+        await self.send_music_controls(ctx.guild, update_attachments=True)
 
-    # ── /music (admin group) ──────────────────────────────────────────────────
+    # ── /music group ──────────────────────────────────────────────────────────
 
-    @commands.hybrid_group(
-        name="music",
-        description="Admin music configuration.",
-        invoke_without_command=True,
-        with_app_command=True,
+    music_group = app_commands.Group(
+        name="music", description="Music configuration commands"
     )
-    @commands.guild_only()
-    async def music_group(self, ctx: commands.Context):
-        embed = discord.Embed(
-            title="🎵 Music Config Commands",
-            description=(
-                "`/music setup [channel]` — Set a dedicated music channel\n"
-                "`/music reset` — Remove the dedicated music channel\n"
-                "`/music settings` — View current music settings"
-            ),
-            color=discord.Color.green(),
-        )
-        await ctx.reply(embed=embed, ephemeral=True)
 
-    @music_group.command(name="setup", description="Set a channel as the dedicated music channel.", with_app_command=True)
-    @app_commands.describe(channel="Text channel for music (leave blank to use this channel)")
+    @commands.hybrid_group(name="music", description="Music configuration commands.", with_app_command=True, invoke_without_command=True)
     @commands.has_permissions(administrator=True)
     @commands.guild_only()
-    async def music_setup(self, ctx: commands.Context, channel: discord.TextChannel | None = None):
-        if ctx.interaction:
-            await ctx.defer(ephemeral=True)
-        target = channel or ctx.channel
-        self._music_channels[str(ctx.guild.id)] = target.id
-        await ctx.reply(
-            embed=discord.Embed(
-                description=f"✅ Music channel set to {target.mention}.\nAll music commands must be used there.",
-                color=discord.Color.green(),
+    async def music_cmd(self, ctx: commands.Context):
+        embed = discord.Embed(
+            title="🎵 Music Config",
+            description=(
+                "**`/music setup`** — Create a dedicated music channel\n"
+                "**`/music reset`** — Remove the dedicated music channel\n"
+                "**`/music settings`** — View and edit music settings"
             ),
-            ephemeral=True,
+            color=discord.Color.blurple(),
         )
-        await self.send_music_controls(ctx.guild, end=True)
+        embed.set_footer(text=f"Requested by {ctx.author}")
+        await ctx.send(embed=embed)
 
-    @music_group.command(name="reset", description="Remove the dedicated music channel.", with_app_command=True)
+    @music_cmd.command(name="setup", description="Create a dedicated music channel.", with_app_command=True)
+    @commands.has_permissions(administrator=True)
+    @commands.guild_only()
+    async def music_setup(self, ctx: commands.Context):
+        try:
+            if ctx.interaction:
+                try:
+                    await ctx.defer(ephemeral=True)
+                except discord.errors.NotFound:
+                    return
+
+            music_data = self._music_data.get(str(ctx.guild.id), {})
+            if music_data.get("channel_id"):
+                return await ctx.reply(
+                    embed=discord.Embed(
+                        description=f"❌ A music channel already exists: <#{music_data['channel_id']}>\nUse `/music reset` to remove it first.",
+                        color=discord.Color.red(),
+                    ).set_footer(text="Use /music reset to reset the music channel."),
+                    delete_after=15,
+                )
+
+            wait_msg = await ctx.send("⏳ Creating the music channel...")
+            try:
+                ch = await ctx.guild.create_text_channel(name="🎸-music-channel")
+            except Exception:
+                return await wait_msg.edit(content="❌ Failed to create the music channel.")
+
+            await _db_upsert(ctx.guild.id, channel_id=str(ch.id), message_id=None, default_volume=80)
+            self._music_data[str(ctx.guild.id)] = {
+                "guild_id": str(ctx.guild.id),
+                "channel_id": str(ch.id),
+                "message_id": None,
+                "default_volume": 80,
+            }
+            await wait_msg.edit(content=f"✅ Music channel created: <#{ch.id}>")
+            await self.send_music_controls(ctx.guild, end=True)
+
+        except Exception:
+            print(f"[Music] music_setup error:\n{traceback.format_exc()}")
+
+    @music_cmd.command(name="reset", description="Remove the dedicated music channel.", with_app_command=True)
     @commands.has_permissions(administrator=True)
     @commands.guild_only()
     async def music_reset(self, ctx: commands.Context):
-        if ctx.interaction:
-            await ctx.defer(ephemeral=True)
-        removed = self._music_channels.pop(str(ctx.guild.id), None)
-        if removed:
-            await ctx.reply(
-                embed=discord.Embed(description="✅ Dedicated music channel removed.", color=discord.Color.green()),
-                ephemeral=True,
-            )
-        else:
-            await ctx.reply(
-                embed=discord.Embed(description="❌ No dedicated music channel is set.", color=discord.Color.red()),
-                ephemeral=True,
-            )
+        try:
+            if ctx.interaction:
+                try:
+                    await ctx.defer(ephemeral=True)
+                except discord.errors.NotFound:
+                    return
 
-    @music_group.command(name="settings", description="View current music settings.", with_app_command=True)
+            music_data = self._music_data.get(str(ctx.guild.id), {})
+            if not music_data.get("channel_id"):
+                return await ctx.reply(
+                    embed=discord.Embed(
+                        description="❌ No dedicated music channel is set.\nUse `/music setup` to create one.",
+                        color=discord.Color.red(),
+                    ),
+                    delete_after=10,
+                )
+
+            wait_msg = await ctx.send("⏳ Removing the music channel...")
+            ch = ctx.guild.get_channel(int(music_data["channel_id"]))
+            if ch:
+                try:
+                    await ch.delete()
+                except Exception:
+                    pass
+
+            await _db_upsert(ctx.guild.id, channel_id=None, message_id=None)
+            self._music_data.pop(str(ctx.guild.id), None)
+            self._manual_controller.pop(str(ctx.guild.id), None)
+            await wait_msg.edit(content="✅ Music channel removed.")
+
+        except Exception:
+            print(f"[Music] music_reset error:\n{traceback.format_exc()}")
+
+    @music_cmd.command(name="settings", description="View and edit music settings.", with_app_command=True)
     @commands.has_permissions(administrator=True)
     @commands.guild_only()
     async def music_settings(self, ctx: commands.Context):
-        if ctx.interaction:
-            await ctx.defer(ephemeral=True)
-        vc: wavelink.Player | None = ctx.guild.voice_client
-        chan_id = self._music_channels.get(str(ctx.guild.id))
-        embed = discord.Embed(title="🎵 Music Settings", color=discord.Color.blurple())
-        embed.add_field(
-            name="Music Channel",
-            value=f"<#{chan_id}>" if chan_id else "*Not set (any channel)*",
-            inline=True,
-        )
-        embed.add_field(name="Lavalink Node", value=f"`{_LAVALINK_URI}`", inline=True)
-        if vc:
-            embed.add_field(name="Connected To", value=f"`{vc.channel.name}`", inline=True)
-            if vc.current:
-                embed.add_field(name="Now Playing", value=_trunc(vc.current.title), inline=False)
-                embed.add_field(name="Volume", value=f"{vc.volume}%", inline=True)
-                loop = "On" if vc.queue.mode == wavelink.QueueMode.loop else "Off"
-                ap   = "On" if vc.autoplay != wavelink.AutoPlayMode.disabled else "Off"
-                embed.add_field(name="Loop", value=loop, inline=True)
-                embed.add_field(name="Autoplay", value=ap, inline=True)
-        if ctx.guild.icon:
-            embed.set_thumbnail(url=ctx.guild.icon.url)
-        embed.set_footer(text=f"Requested by {ctx.author}")
-        await ctx.reply(embed=embed, ephemeral=True)
+        try:
+            if ctx.interaction:
+                try:
+                    await ctx.defer(ephemeral=True)
+                except discord.errors.NotFound:
+                    return
+
+            # Ensure a DB row exists for this guild
+            if str(ctx.guild.id) not in self._music_data:
+                await _db_upsert(ctx.guild.id, default_volume=80)
+                self._music_data[str(ctx.guild.id)] = {
+                    "guild_id": str(ctx.guild.id), "channel_id": None,
+                    "message_id": None, "default_volume": 80,
+                }
+
+            async def build_embed():
+                data = self._music_data.get(str(ctx.guild.id), {})
+                embed = discord.Embed(
+                    title="🎵 Music Settings",
+                    description="Configure music settings for this server.",
+                    color=discord.Color.green(),
+                )
+                embed.add_field(
+                    name="Default Volume",
+                    value=f"`{data.get('default_volume') or 80}%`",
+                    inline=True,
+                )
+                embed.add_field(
+                    name="Music Channel",
+                    value=(f"<#{data['channel_id']}>" if data.get("channel_id") else "`Not set`"),
+                    inline=True,
+                )
+                embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+                if ctx.guild.icon:
+                    embed.set_thumbnail(url=ctx.guild.icon.url)
+                return embed
+
+            timeout_time = 200
+            cancelled = False
+
+            async def build_view(disabled=False):
+                nonlocal timeout_time
+                timeout_time = 200
+                view = discord.ui.View(timeout=200)
+
+                vol_btn = discord.ui.Button(
+                    label="Set Default Volume",
+                    style=discord.ButtonStyle.primary,
+                    emoji="🔊",
+                    row=0,
+                )
+                cancel_btn = discord.ui.Button(
+                    label="Cancel",
+                    style=discord.ButtonStyle.secondary,
+                    emoji="❌",
+                    row=0,
+                )
+
+                data = self._music_data.get(str(ctx.guild.id), {})
+                default_values = []
+                if data.get("channel_id"):
+                    ch = ctx.guild.get_channel(int(data["channel_id"]))
+                    if ch:
+                        default_values = [ch]
+
+                chan_select = discord.ui.ChannelSelect(
+                    placeholder="Select dedicated music channel (optional)",
+                    min_values=0,
+                    max_values=1,
+                    row=1,
+                    channel_types=[discord.ChannelType.text],
+                    default_values=default_values,
+                )
+
+                async def vol_btn_callback(interaction: discord.Interaction):
+                    if interaction.user.id != ctx.author.id:
+                        return await interaction.response.send_message("❌ Not your button.", ephemeral=True)
+                    cur_vol = str(self._music_data.get(str(ctx.guild.id), {}).get("default_volume") or 80)
+
+                    class VolumeModal(discord.ui.Modal, title="Set Default Volume"):
+                        new_vol = discord.ui.TextInput(
+                            label="Default Volume (0–100)",
+                            placeholder="80",
+                            required=True,
+                            max_length=3,
+                            default=cur_vol,
+                            style=discord.TextStyle.short,
+                        )
+
+                        async def on_submit(self_, i: discord.Interaction):
+                            try:
+                                v = int(self_.new_vol.value)
+                            except ValueError:
+                                return await i.response.send_message("❌ Invalid number.", ephemeral=True, delete_after=5)
+                            if not 0 <= v <= 100:
+                                return await i.response.send_message("❌ Must be 0–100.", ephemeral=True, delete_after=5)
+                            await i.response.defer()
+                            await _db_upsert(ctx.guild.id, default_volume=v)
+                            self._music_data.setdefault(str(ctx.guild.id), {})["default_volume"] = v
+                            await msg.edit(embed=await build_embed(), view=await build_view())
+
+                    await interaction.response.send_modal(VolumeModal())
+
+                async def cancel_callback(interaction: discord.Interaction):
+                    if interaction.user.id != ctx.author.id:
+                        return await interaction.response.send_message("❌ Not your button.", ephemeral=True)
+                    nonlocal cancelled
+                    cancelled = True
+                    await interaction.response.defer()
+                    await msg.edit(embed=await build_embed(), view=await build_view(disabled=True))
+
+                async def chan_select_callback(interaction: discord.Interaction):
+                    if interaction.user.id != ctx.author.id:
+                        return await interaction.response.send_message("❌ Not your select.", ephemeral=True)
+                    await interaction.response.defer()
+                    values = interaction.data.get("values", [])
+                    chan_id = values[0] if values else None
+                    await _db_upsert(ctx.guild.id, channel_id=chan_id, message_id=None)
+                    self._music_data.setdefault(str(ctx.guild.id), {})["channel_id"] = chan_id
+                    self._music_data[str(ctx.guild.id)]["message_id"] = None
+                    await msg.edit(embed=await build_embed(), view=await build_view())
+
+                vol_btn.callback    = vol_btn_callback
+                cancel_btn.callback = cancel_callback
+                chan_select.callback = chan_select_callback
+
+                view.add_item(vol_btn)
+                view.add_item(cancel_btn)
+                view.add_item(chan_select)
+
+                if disabled:
+                    for item in view.children:
+                        item.disabled = True
+
+                return view
+
+            msg = await ctx.send(embed=await build_embed(), view=await build_view())
+
+            while not cancelled:
+                timeout_time -= 1
+                if timeout_time <= 0:
+                    try:
+                        await msg.edit(embed=await build_embed(), view=await build_view(disabled=True))
+                    except Exception:
+                        pass
+                    break
+                await asyncio.sleep(1)
+
+        except Exception:
+            print(f"[Music] music_settings error:\n{traceback.format_exc()}")
 
 
 async def setup(bot: commands.Bot):
