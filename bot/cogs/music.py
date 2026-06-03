@@ -421,6 +421,24 @@ class MusicCog(commands.Cog, name="Music"):
         except Exception:
             pass
 
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ):
+        if member.bot:
+            return
+        vc: "wavelink.Player | None" = member.guild.voice_client
+        if not vc:
+            return
+        if before.channel != vc.channel:
+            return
+        human_listeners = [m for m in vc.channel.members if not m.bot]
+        if len(human_listeners) == 0 and vc.playing:
+            pass
+
     # ── Queue text helper ─────────────────────────────────────────────────────
 
     def _build_queue_summary(self, player: "wavelink.Player | None") -> str:
@@ -567,15 +585,9 @@ class MusicCog(commands.Cog, name="Music"):
                 ephemeral=True, delete_after=8,
             )
             return None
-        if not interaction.user.voice:
+        if not interaction.user.voice or interaction.user.voice.channel != vc.channel:
             await interaction.response.send_message(
-                embed=discord.Embed(description="Join a voice channel to use the controller.", color=discord.Color.red()),
-                ephemeral=True, delete_after=8,
-            )
-            return None
-        if vc.channel != interaction.user.voice.channel:
-            await interaction.response.send_message(
-                embed=discord.Embed(description="You need to be in the same voice channel.", color=discord.Color.red()),
+                embed=discord.Embed(description="You need to be in the same voice channel to use the controller.", color=discord.Color.red()),
                 ephemeral=True, delete_after=8,
             )
             return None
@@ -902,8 +914,6 @@ class MusicCog(commands.Cog, name="Music"):
         vc: "wavelink.Player | None" = ctx.guild.voice_client
         if not vc:
             return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
-        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
-            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
         if vc.paused:
             return await ctx.reply("⏸ Already paused.", delete_after=8)
         await vc.pause(True)
@@ -924,8 +934,6 @@ class MusicCog(commands.Cog, name="Music"):
         vc: "wavelink.Player | None" = ctx.guild.voice_client
         if not vc:
             return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
-        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
-            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
         if not vc.paused:
             return await ctx.reply("▶️ Already playing.", delete_after=8)
         await vc.pause(False)
@@ -946,8 +954,6 @@ class MusicCog(commands.Cog, name="Music"):
         vc: "wavelink.Player | None" = ctx.guild.voice_client
         if not vc:
             return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
-        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
-            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
         if not vc.playing and not vc.paused:
             return await ctx.reply("❌ No track is currently playing.", delete_after=10)
         await vc.stop()
@@ -967,8 +973,6 @@ class MusicCog(commands.Cog, name="Music"):
         vc: "wavelink.Player | None" = ctx.guild.voice_client
         if not vc:
             return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
-        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
-            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
         if vc.queue.mode == wavelink.QueueMode.loop:
             vc.queue.mode = wavelink.QueueMode.normal
             await ctx.reply("✅ Looping **disabled**.")
@@ -991,8 +995,6 @@ class MusicCog(commands.Cog, name="Music"):
         vc: "wavelink.Player | None" = ctx.guild.voice_client
         if not vc:
             return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
-        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
-            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
         if vc.autoplay == wavelink.AutoPlayMode.disabled:
             vc.autoplay = wavelink.AutoPlayMode.enabled
             await ctx.reply("✅ Autoplay **enabled**.")
@@ -1022,8 +1024,6 @@ class MusicCog(commands.Cog, name="Music"):
                 except Exception:
                     pass
             return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
-        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
-            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
         vc.queue.clear()
         await vc.stop()
         await vc.disconnect()
@@ -1064,8 +1064,6 @@ class MusicCog(commands.Cog, name="Music"):
         vc: "wavelink.Player | None" = ctx.guild.voice_client
         if not vc:
             return await ctx.reply("❌ The bot is not connected to any voice channel.", delete_after=10)
-        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
-            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
         if volume is None:
             return await ctx.reply(f"🔊 Current volume: **{vc.volume}%**")
         if not 0 <= volume <= 100:
@@ -1172,8 +1170,6 @@ class MusicCog(commands.Cog, name="Music"):
         vc: "wavelink.Player | None" = ctx.guild.voice_client
         if not vc or not vc.current:
             return await ctx.reply("❌ No track is currently playing.", delete_after=10)
-        if not ctx.author.voice or vc.channel != ctx.author.voice.channel:
-            return await ctx.reply("❌ You need to be in the same voice channel.", delete_after=10)
         ms = seconds * 1000
         if not 0 <= ms <= vc.current.length:
             return await ctx.reply(f"❌ Seek position must be between 0 and {_fmt_ms(vc.current.length)}.", delete_after=10)
