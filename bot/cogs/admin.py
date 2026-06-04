@@ -273,6 +273,54 @@ def _db_update_last_msg(pin_id: str, channel_id: int, msg_id: int) -> None:
     )
 
 
+import re as _re
+
+# Hosts that serve GIF/image page URLs (not direct media files)
+_GIF_PAGE_HOSTS = ("tenor.com", "giphy.com", "gfycat.com", "imgur.com", "tumblr.com")
+
+# Hosts that are already direct image/media URLs — skip page resolution for these
+_DIRECT_IMAGE_HOSTS = ("i.imgur.com", "media.tenor.com", "media.giphy.com", "media1.tenor.com", "media2.tenor.com")
+
+
+def _is_gif_page_url(url: str) -> bool:
+    """Return True if the URL points to a GIF page that needs resolution (not a direct media file)."""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).netloc.lower().lstrip("www.")
+        # Exclude known direct-image hosts first
+        if any(host == h or host.endswith("." + h) for h in _DIRECT_IMAGE_HOSTS):
+            return False
+        return any(host == h or host.endswith("." + h) for h in _GIF_PAGE_HOSTS)
+    except Exception:
+        return False
+
+
+async def _resolve_gif_page(session: aiohttp.ClientSession, page_url: str) -> str | None:
+    """
+    Fetch a GIF page (Tenor, Giphy, Imgur, Tumblr, etc.) and extract
+    the direct media URL from og:image meta tag.
+    Returns the direct URL string, or None if extraction fails.
+    """
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; DiscordBot/1.0)"}
+        async with session.get(page_url, headers=headers) as resp:
+            if resp.status != 200:
+                return None
+            html = await resp.text(errors="ignore")
+        match = _re.search(
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\']+)["\']',
+            html,
+        ) or _re.search(
+            r'<meta[^>]+content=["\'](https?://[^"\']+)["\'][^>]+property=["\']og:image["\']',
+            html,
+        )
+        if match:
+            return match.group(1).split("?")[0]  # strip query params
+    except Exception as e:
+        print(f"[StickyPin] GIF page resolve failed ({e})")
+    return None
+
+
 async def _send_with_image(
     channel: discord.TextChannel,
     text: str | None,
@@ -281,24 +329,38 @@ async def _send_with_image(
 ) -> discord.Message:
     """
     Send a message with an inline image attachment (no embed box).
-    Downloads the image from image_url and re-uploads it so Discord
-    shows it as an actual image — not a filename link and not an embed.
+    For Tenor/Giphy page URLs, extracts the direct media URL and uploads
+    the GIF as a file so only text + image appear (no raw link shown).
     Falls back to an embed if the download fails.
     """
-    try:
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(image_url) as resp:
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        # For Tenor/Giphy page links, resolve the direct media URL first
+        direct_url = image_url
+        if _is_gif_page_url(image_url):
+            resolved = await _resolve_gif_page(session, image_url)
+            if resolved:
+                direct_url = resolved
+            else:
+                # Could not extract — fall back to embed (still no raw link in content)
+                embed = discord.Embed(description=text or None, color=0x2b2d31)
+                embed.set_image(url=image_url)
+                return await channel.send(embed=embed, view=view)
+
+        try:
+            async with session.get(direct_url) as resp:
                 if resp.status == 200:
-                    data = await resp.read()
                     ct = resp.content_type or ""
-                    fname = "image.gif" if ("gif" in ct or image_url.lower().split("?")[0].endswith(".gif")) else "image.png"
-                    file = discord.File(io.BytesIO(data), filename=fname)
-                    return await channel.send(content=text or None, file=file, view=view)
-    except Exception as e:
-        print(f"[StickyPin] Image re-upload failed ({e}), falling back to embed")
+                    if ct.startswith("image/"):
+                        data = await resp.read()
+                        fname = "image.gif" if ("gif" in ct or direct_url.lower().endswith(".gif")) else "image.png"
+                        file = discord.File(io.BytesIO(data), filename=fname)
+                        return await channel.send(content=text or None, file=file, view=view)
+        except Exception as e:
+            print(f"[StickyPin] Image re-upload failed ({e}), falling back to embed")
+
     embed = discord.Embed(description=text or None, color=0x2b2d31)
-    embed.set_image(url=image_url)
+    embed.set_image(url=direct_url)
     return await channel.send(embed=embed, view=view)
 
 
