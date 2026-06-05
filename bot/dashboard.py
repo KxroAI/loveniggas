@@ -22,22 +22,32 @@ from datetime import datetime, timezone
 _pending_states: dict[str, float] = {}
 
 def _register_state(state: str, ttl: int = 600) -> None:
-    """Store an OAuth state with a TTL (default 10 min)."""
+    """Store an OAuth state in the in-memory dict AND the Flask session."""
     _pending_states[state] = _time.time() + ttl
     # Prune expired entries on each write
     now = _time.time()
     expired = [k for k, v in list(_pending_states.items()) if v < now]
     for k in expired:
         _pending_states.pop(k, None)
+    # Also persist in the session cookie so state survives server restarts
+    session["_oauth_state"] = state
+    session["_oauth_state_exp"] = _time.time() + ttl
 
 def _consume_state(state: str) -> bool:
-    """Return True and remove state if it's valid and unexpired."""
+    """Return True and remove state if valid — checks session cookie first, then in-memory dict."""
     if not state:
         return False
+    # Primary: session cookie (survives server restarts)
+    sess_state = session.pop("_oauth_state", None)
+    sess_exp   = session.pop("_oauth_state_exp", 0)
+    if sess_state and sess_state == state and _time.time() < sess_exp:
+        _pending_states.pop(state, None)
+        return True
+    # Fallback: in-memory dict (same-process requests)
     expiry = _pending_states.pop(state, None)
-    if expiry is None:
-        return False
-    return _time.time() < expiry
+    if expiry is not None and _time.time() < expiry:
+        return True
+    return False
 
 DISCORD_API = "https://discord.com/api/v10"
 OAUTH_URL   = "https://discord.com/api/oauth2/authorize"
