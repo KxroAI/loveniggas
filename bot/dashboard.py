@@ -11,9 +11,9 @@ import hmac as _hmac
 import hashlib as _hashlib
 import base64 as _base64
 import urllib.parse
-import urllib.request
 import json as _json
 import secrets as _secrets
+import requests as _requests
 
 from flask import Blueprint, redirect, request, session, render_template_string
 from datetime import datetime, timezone
@@ -88,14 +88,20 @@ def _redirect_uri() -> str:
     return f"http://localhost:{port}/dashboard/callback"
 
 
+_UA = "DiscordBot (https://github.com/neroniel/bot, 1) Python/3.12"
+_SESS = _requests.Session()
+_SESS.headers.update({"User-Agent": _UA})
+
+
 def _discord_get(endpoint: str, token: str):
-    req = urllib.request.Request(
-        f"{DISCORD_API}{endpoint}",
-        headers={"Authorization": f"Bearer {token}"},
-    )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return _json.loads(resp.read().decode())
+        r = _SESS.get(
+            f"{DISCORD_API}{endpoint}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        return r.json()
     except Exception:
         return None
 
@@ -104,13 +110,14 @@ def _bot_get(endpoint: str):
     token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
     if not token:
         return None
-    req = urllib.request.Request(
-        f"{DISCORD_API}{endpoint}",
-        headers={"Authorization": f"Bot {token}"},
-    )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return _json.loads(resp.read().decode())
+        r = _SESS.get(
+            f"{DISCORD_API}{endpoint}",
+            headers={"Authorization": f"Bot {token}"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        return r.json()
     except Exception:
         return None
 
@@ -121,30 +128,23 @@ def _exchange_code(code: str):
     if not client_id or not client_secret:
         return None, "DISCORD_CLIENT_ID or DISCORD_CLIENT_SECRET is not set."
     redirect = _redirect_uri()
-    data = urllib.parse.urlencode({
-        "client_id":     client_id,
-        "client_secret": client_secret,
-        "grant_type":    "authorization_code",
-        "code":          code,
-        "redirect_uri":  redirect,
-        "scope":         SCOPES,
-    }).encode()
-    req = urllib.request.Request(
-        TOKEN_URL, data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return _json.loads(resp.read().decode()), None
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")
-        return None, (
-            f"Discord returned HTTP {e.code}. "
-            f"Make sure this **exact redirect URI** is added to your Discord app's OAuth2 Redirects:\n\n"
-            f"`{redirect}`\n\n"
-            f"Discord error: `{body}`"
+        r = _SESS.post(
+            TOKEN_URL,
+            data={
+                "client_id":     client_id,
+                "client_secret": client_secret,
+                "grant_type":    "authorization_code",
+                "code":          code,
+                "redirect_uri":  redirect,
+                "scope":         SCOPES,
+            },
+            timeout=10,
         )
+        r.raise_for_status()
+        return r.json(), None
+    except _requests.HTTPError as e:
+        return None, f"Discord returned HTTP {e.response.status_code}: {e.response.text}"
     except Exception as exc:
         return None, str(exc)
 
@@ -154,18 +154,12 @@ def _revoke_token(token: str):
     client_secret = os.getenv("DISCORD_CLIENT_SECRET")
     if not client_id or not client_secret:
         return
-    data = urllib.parse.urlencode({
-        "client_id":     client_id,
-        "client_secret": client_secret,
-        "token":         token,
-    }).encode()
-    req = urllib.request.Request(
-        REVOKE_URL, data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
     try:
-        urllib.request.urlopen(req, timeout=5)
+        _SESS.post(
+            REVOKE_URL,
+            data={"client_id": client_id, "client_secret": client_secret, "token": token},
+            timeout=5,
+        )
     except Exception:
         pass
 
