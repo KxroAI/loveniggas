@@ -7,6 +7,9 @@ Optional: DASHBOARD_REDIRECT_URI (auto-detected from REPLIT_DEV_DOMAIN if not se
 
 import os
 import time as _time
+import hmac as _hmac
+import hashlib as _hashlib
+import base64 as _base64
 import urllib.parse
 import urllib.request
 import json as _json
@@ -15,39 +18,45 @@ import secrets as _secrets
 from flask import Blueprint, redirect, request, session, render_template_string
 from datetime import datetime, timezone
 
-# ── Server-side OAuth state store ────────────────────────────────────────────
-# Keyed by state token → expiry Unix timestamp.
-# Avoids relying on Flask session cookies (which can be lost on cross-site
-# redirects from Discord back to Render/production hosts).
-_pending_states: dict[str, float] = {}
+# ── Stateless HMAC-signed OAuth state ────────────────────────────────────────
+# State = base64url(expiry_ts:nonce) + "." + HMAC-SHA256(payload, secret)
+# No server-side storage — survives restarts and multi-instance deployments.
 
-def _register_state(state: str, ttl: int = 600) -> None:
-    """Store an OAuth state in the in-memory dict AND the Flask session."""
-    _pending_states[state] = _time.time() + ttl
-    # Prune expired entries on each write
-    now = _time.time()
-    expired = [k for k, v in list(_pending_states.items()) if v < now]
-    for k in expired:
-        _pending_states.pop(k, None)
-    # Also persist in the session cookie so state survives server restarts
-    session["_oauth_state"] = state
-    session["_oauth_state_exp"] = _time.time() + ttl
+def _signing_key() -> bytes:
+    """Derive a stable signing key from the app secret."""
+    raw = os.getenv("DASHBOARD_SECRET") or os.getenv("FLASK_SECRET_KEY") or "neroniel-dashboard-local-secret-CHANGE-ME"
+    return _hashlib.sha256(raw.encode()).digest()
 
-def _consume_state(state: str) -> bool:
-    """Return True and remove state if valid — checks session cookie first, then in-memory dict."""
-    if not state:
+def _b64(data: str) -> str:
+    return _base64.urlsafe_b64encode(data.encode()).decode().rstrip("=")
+
+def _sign(payload: str) -> str:
+    return _hmac.new(_signing_key(), payload.encode(), _hashlib.sha256).hexdigest()
+
+def _make_state(ttl: int = 600) -> str:
+    """Create a self-contained signed state token that expires after `ttl` seconds."""
+    exp   = int(_time.time()) + ttl
+    nonce = _secrets.token_hex(12)
+    payload = _b64(f"{exp}:{nonce}")
+    sig     = _sign(payload)
+    return f"{payload}.{sig}"
+
+def _verify_state(state: str) -> bool:
+    """Return True if the state token has a valid signature and has not expired."""
+    if not state or "." not in state:
         return False
-    # Primary: session cookie (survives server restarts)
-    sess_state = session.pop("_oauth_state", None)
-    sess_exp   = session.pop("_oauth_state_exp", 0)
-    if sess_state and sess_state == state and _time.time() < sess_exp:
-        _pending_states.pop(state, None)
-        return True
-    # Fallback: in-memory dict (same-process requests)
-    expiry = _pending_states.pop(state, None)
-    if expiry is not None and _time.time() < expiry:
-        return True
-    return False
+    try:
+        payload, sig = state.rsplit(".", 1)
+        # Constant-time comparison to prevent timing attacks
+        if not _hmac.compare_digest(_sign(payload), sig):
+            return False
+        # Decode payload and check expiry
+        padded   = payload + "=" * (-len(payload) % 4)
+        decoded  = _base64.urlsafe_b64decode(padded).decode()
+        exp, _   = decoded.split(":", 1)
+        return _time.time() < int(exp)
+    except Exception:
+        return False
 
 DISCORD_API = "https://discord.com/api/v10"
 OAUTH_URL   = "https://discord.com/api/oauth2/authorize"
@@ -455,8 +464,7 @@ def login():
     if not client_id:
         return _err("DISCORD_CLIENT_ID is not set in environment variables.", 500)
 
-    state = _secrets.token_urlsafe(16)
-    _register_state(state)
+    state = _make_state()
 
     params = urllib.parse.urlencode({
         "client_id":     client_id,
@@ -478,7 +486,7 @@ def callback():
     state = request.args.get("state")
     if not code:
         return _err("No authorization code received from Discord.", 400)
-    if not _consume_state(state):
+    if not _verify_state(state):
         return _err("Invalid OAuth state. Please try logging in again.", 400)
 
     token_data, exchange_err = _exchange_code(code)
