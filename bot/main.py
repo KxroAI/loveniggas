@@ -37,6 +37,10 @@ app.secret_key = os.getenv("DASHBOARD_SECRET", os.getenv("FLASK_SECRET_KEY", "ne
 from .dashboard import dashboard_bp  # noqa: E402
 app.register_blueprint(dashboard_bp)
 
+# Register verify OAuth blueprint
+from .verify_oauth import verify_oauth_bp  # noqa: E402
+app.register_blueprint(verify_oauth_bp)
+
 _CHALLENGE_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -623,6 +627,8 @@ class NeronielBot(commands.Bot):
             "bot.cogs.vccontrol",
             "bot.cogs.ticket",
             "bot.cogs.welcomer",
+            # Verify system
+            "bot.cogs.verify",
             # Antinuke command cogs
             "bot.cogs.antinuke",
             "bot.cogs.anti_wl",
