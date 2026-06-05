@@ -19,10 +19,9 @@ import json
 import time
 import secrets as _secrets
 import urllib.parse
-import urllib.request
-import urllib.error
 import asyncio
 import aiosqlite
+import requests as _requests
 
 from flask import Blueprint, redirect, request
 
@@ -89,34 +88,37 @@ def _consume_state(state: str) -> dict | None:
     return None
 
 
+_UA = "DiscordBot (https://github.com/neroniel/bot, 1) Python/3.12"
+_SESS = _requests.Session()
+_SESS.headers.update({"User-Agent": _UA})
+
+
 def _exchange_code(code: str) -> tuple[str | None, str | None]:
     """Exchange an auth code for an access token. Returns (token, error_msg)."""
     client_id     = os.getenv("DISCORD_CLIENT_ID")
     client_secret = os.getenv("DISCORD_CLIENT_SECRET")
     if not client_id or not client_secret:
         return None, "DISCORD_CLIENT_ID or DISCORD_CLIENT_SECRET is not set."
-    body = urllib.parse.urlencode({
-        "client_id":     client_id,
-        "client_secret": client_secret,
-        "grant_type":    "authorization_code",
-        "code":          code,
-        "redirect_uri":  _callback_uri(),
-    }).encode()
-    req = urllib.request.Request(
-        TOKEN_URL, data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-            token = data.get("access_token")
-            if not token:
-                return None, f"No access_token in response: {data}"
-            return token, None
-    except urllib.error.HTTPError as e:
-        body_txt = e.read().decode(errors="replace")
-        return None, f"Discord HTTP {e.code}: {body_txt}"
+        r = _SESS.post(
+            TOKEN_URL,
+            data={
+                "client_id":     client_id,
+                "client_secret": client_secret,
+                "grant_type":    "authorization_code",
+                "code":          code,
+                "redirect_uri":  _callback_uri(),
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        token = data.get("access_token")
+        if not token:
+            return None, f"No access_token in response: {data}"
+        return token, None
+    except _requests.HTTPError as e:
+        return None, f"Discord HTTP {e.response.status_code}: {e.response.text}"
     except Exception as exc:
         return None, str(exc)
 
@@ -124,22 +126,17 @@ def _exchange_code(code: str) -> tuple[str | None, str | None]:
 def _bot_put(endpoint: str, payload: dict | None = None) -> tuple[int, str]:
     """Make an authenticated Bot PUT request. Returns (status, body)."""
     token = os.getenv("DISCORD_TOKEN")
-    data  = json.dumps(payload or {}).encode() if payload is not None else b""
-    req   = urllib.request.Request(
-        f"{DISCORD_API}{endpoint}",
-        data=data,
-        headers={
-            "Authorization":  f"Bot {token}",
-            "Content-Type":   "application/json",
-            "X-Audit-Log-Reason": "Neroniel Verify System",
-        },
-        method="PUT",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status, resp.read().decode(errors="replace")
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode(errors="replace")
+        r = _SESS.put(
+            f"{DISCORD_API}{endpoint}",
+            json=payload or {},
+            headers={
+                "Authorization":      f"Bot {token}",
+                "X-Audit-Log-Reason": "Neroniel Verify System",
+            },
+            timeout=10,
+        )
+        return r.status_code, r.text
     except Exception as exc:
         return 0, str(exc)
 
