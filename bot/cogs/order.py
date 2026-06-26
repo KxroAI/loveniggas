@@ -59,31 +59,31 @@ PLACEHOLDERS_HINT = (
 
 _CONFIG_DEFAULTS: dict = {
     # Confirmation message
-    "confirm_msg_type":     "embed",
-    "confirm_content":      "",
-    "confirm_embed_title":  "order confirmation 🎫",
-    "confirm_embed_desc":   "⚜ buyer: **{buyer}**\n⚜ item: **{item}**\n⚜ amount: **{amount}**",
-    "confirm_embed_color":  0x5865F2,
-    "confirm_embed_footer": "",
-    "confirm_image_url":    "",
-    "confirm_ephemeral":    False,
-    # Confirm buttons (trigger followup + DM)
-    "confirm_buttons":      [{"label": "confirm order"}],
+    "confirm_msg_type":       "embed",
+    "confirm_content":        "",
+    "confirm_embed_title":    "order confirmation 🎫",
+    "confirm_embed_desc":     "⚜ buyer: **{buyer}**\n⚜ item: **{item}**\n⚜ amount: **{amount}**",
+    "confirm_embed_color":    0x5865F2,
+    "confirm_embed_footer":   "",
+    "confirm_image_url":      "",
+    "confirm_ephemeral":      False,
+    # Confirm buttons
+    "confirm_buttons":        [{"label": "confirm order"}],
     "confirm_btn_restricted": True,
     # Follow-up messages
-    "followup_messages":    [],
-    "followup_buttons":     [],
-    "followup_ephemeral":   False,
+    "followup_messages":      [],
+    "followup_buttons":       [],
+    "followup_ephemeral":     False,
     # DM to buyer
-    "dm_msg_type":          "",
-    "dm_content":           "",
-    "dm_embed_title":       "",
-    "dm_embed_desc":        "",
-    "dm_embed_color":       0x57F287,
-    "dm_embed_footer":      "",
-    "dm_image_url":         "",
-    "dm_buttons":           [],
-    "dm_failed_msg":        "⚠️ {buyer} DMs are closed — please send payment details manually.",
+    "dm_msg_type":            "",
+    "dm_content":             "",
+    "dm_embed_title":         "",
+    "dm_embed_desc":          "",
+    "dm_embed_color":         0x57F287,
+    "dm_embed_footer":        "",
+    "dm_image_url":           "",
+    "dm_buttons":             [],
+    "dm_failed_msg":          "⚠️ {buyer} DMs are closed — please send payment details manually.",
 }
 
 
@@ -97,7 +97,11 @@ def _load_cfg(guild_id: int, order_type: str) -> dict:
     cfg["order_type"] = order_type
     if not db.is_connected or db.order_configs is None:
         return cfg
-    doc = db.order_configs.find_one({"guild_id": guild_id, "order_type": order_type, "_doc_type": {"$ne": "order_instance"}})
+    doc = db.order_configs.find_one({
+        "guild_id": guild_id,
+        "order_type": order_type,
+        "_doc_type": {"$ne": "order_instance"},
+    })
     if doc:
         doc.pop("_id", None)
         cfg.update(doc)
@@ -159,15 +163,7 @@ def _is_configured(guild_id: int, order_type: str) -> bool:
 # BUILD DISCORD OBJECTS FROM CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _build_embed(
-    title: str,
-    description: str,
-    color: int,
-    footer: str,
-    image_url: str,
-    ph: dict,
-) -> discord.Embed:
-    """Create a discord.Embed applying placeholders and optional image."""
+def _build_embed(title: str, description: str, color: int, footer: str, image_url: str, ph: dict) -> discord.Embed:
     e = discord.Embed(
         title=_apply_ph(title, ph) or None,
         description=_apply_ph(description, ph) or None,
@@ -183,7 +179,6 @@ def _build_embed(
 
 
 def _make_text_embed_with_image(content: str, image_url: str, ph: dict) -> discord.Embed:
-    """For plain-text messages with an image — wrap in a minimal embed."""
     e = discord.Embed(description=_apply_ph(content, ph) or None, color=0x2b2d31)
     img = _apply_ph(image_url, ph).strip()
     if img and _is_valid_url(img):
@@ -191,7 +186,7 @@ def _make_text_embed_with_image(content: str, image_url: str, ph: dict) -> disco
     return e
 
 
-def _build_link_view(buttons: list[dict]) -> Optional[discord.ui.View]:
+def _build_link_view(buttons: list) -> Optional[discord.ui.View]:
     if not buttons:
         return None
     v = discord.ui.View(timeout=None)
@@ -219,26 +214,18 @@ def _upload_waiting_embed(label: str) -> discord.Embed:
 class ImageUploadWaitView(ui.View):
     """
     Replaces the wizard embed while waiting for the user to send
-    an image attachment in the channel. On receipt (or cancel/timeout)
-    it restores the wizard at the correct step.
+    an image attachment in the channel. Restores the wizard on
+    receipt, cancel, or timeout.
     """
-    def __init__(
-        self,
-        state: "SetupState",
-        cog,
-        cfg_key: str,
-        restore_embed_fn,
-        restore_view_cls,
-        followup_idx: Optional[int] = None,
-    ):
+    def __init__(self, state, cog, cfg_key: str, restore_embed_fn, restore_view_cls, followup_idx: Optional[int] = None):
         super().__init__(timeout=70)
-        self.state           = state
-        self.cog             = cog
-        self.cfg_key         = cfg_key
-        self.restore_embed   = restore_embed_fn
-        self.restore_view    = restore_view_cls
-        self.followup_idx    = followup_idx  # set when uploading a per-followup image
-        self._done           = False
+        self.state          = state
+        self.cog            = cog
+        self.cfg_key        = cfg_key
+        self.restore_embed  = restore_embed_fn
+        self.restore_view   = restore_view_cls
+        self.followup_idx   = followup_idx
+        self._done          = False
         self._task: Optional[asyncio.Task] = None
 
     def start(self, interaction: discord.Interaction) -> None:
@@ -282,16 +269,11 @@ class ImageUploadWaitView(ui.View):
         if self._done:
             return
         self._done = True
-
-        url = msg.attachments[0].url
-        await self._apply_url(url)
-
-        # Delete the upload message to keep the channel tidy
+        await self._apply_url(msg.attachments[0].url)
         try:
             await msg.delete()
         except Exception:
             pass
-
         await self._restore(original)
 
     @ui.button(label="❌ Cancel", style=discord.ButtonStyle.danger)
@@ -373,14 +355,14 @@ class MainMenuView(ui.View):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WIZARD — STEP 1: CONFIRMATION MESSAGE  (type + image + ephemeral)
+# WIZARD — STEP 1: CONFIRMATION MESSAGE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _step1_embed(state: SetupState) -> discord.Embed:
-    cfg      = state.cfg
-    label    = ORDER_TYPE_LABELS.get(state.order_type, state.order_type)
-    msg_type = cfg.get("confirm_msg_type", "embed")
-    image    = cfg.get("confirm_image_url", "") or "*(none)*"
+    cfg       = state.cfg
+    label     = ORDER_TYPE_LABELS.get(state.order_type, state.order_type)
+    msg_type  = cfg.get("confirm_msg_type", "embed")
+    image     = cfg.get("confirm_image_url", "") or "*(none)*"
     ephemeral = cfg.get("confirm_ephemeral", False)
     e = discord.Embed(
         title=f"🛒 Setup {label} — Step 1 of 5",
@@ -389,7 +371,7 @@ def _step1_embed(state: SetupState) -> discord.Embed:
             "Posted in the channel when the order command is run.\n\n"
             f"**Placeholders:** {PLACEHOLDERS_HINT}\n\n"
             f"**Current type:** `{msg_type}`\n"
-            f"**Image/GIF URL:** {image}\n"
+            f"**Image/GIF:** {image}\n"
             f"**Ephemeral:** {'🔒 ON (only command runner sees it)' if ephemeral else '🔓 OFF (visible to everyone)'}"
         ),
         color=0x5865F2,
@@ -398,20 +380,16 @@ def _step1_embed(state: SetupState) -> discord.Embed:
     return e
 
 
-# ── Modals ─────────────────────────────────────────────────────────────────────
-
 class TextConfirmModal(ui.Modal, title="📝 Confirmation — Text Message"):
-    content   = ui.TextInput(label="Message Content", placeholder="⚜ buyer: {buyer}\n⚜ item: {item}", style=discord.TextStyle.paragraph, max_length=2000, required=True)
-    image_url = ui.TextInput(label="Image / GIF URL (optional)", placeholder="https://…", required=False, max_length=512)
+    content   = ui.TextInput(label="Message Content",               placeholder="⚜ buyer: {buyer}\n⚜ item: {item}", style=discord.TextStyle.paragraph, max_length=2000, required=True)
+    image_url = ui.TextInput(label="Image / GIF URL (optional)",    placeholder="https://…",                         required=False,                    max_length=512)
 
     def __init__(self, state: SetupState, cog):
         super().__init__()
         self.state = state
         self.cog   = cog
-        if state.cfg.get("confirm_content"):
-            self.content.default   = state.cfg["confirm_content"]
-        if state.cfg.get("confirm_image_url"):
-            self.image_url.default = state.cfg["confirm_image_url"]
+        if state.cfg.get("confirm_content"):   self.content.default   = state.cfg["confirm_content"]
+        if state.cfg.get("confirm_image_url"): self.image_url.default = state.cfg["confirm_image_url"]
 
     async def on_submit(self, interaction: discord.Interaction):
         self.state.cfg["confirm_msg_type"]  = "text"
@@ -421,11 +399,11 @@ class TextConfirmModal(ui.Modal, title="📝 Confirmation — Text Message"):
 
 
 class EmbedConfirmModal(ui.Modal, title="🎨 Confirmation — Embed Message"):
-    title_in    = ui.TextInput(label="Title",                     placeholder="order confirmation 🎫",                                  max_length=256,  required=True)
-    description = ui.TextInput(label="Description",               placeholder="⚜ buyer: {buyer}\n⚜ item: {item}\n⚜ amount: {amount}", style=discord.TextStyle.paragraph, max_length=4000, required=True)
-    footer      = ui.TextInput(label="Footer (optional)",                                                                                required=False,  max_length=2048)
-    color       = ui.TextInput(label="Color hex (e.g. #5865F2)", default="#5865F2",                                                      required=False,  max_length=9)
-    image_url   = ui.TextInput(label="Image / GIF URL (optional)", placeholder="https://…",                                              required=False,  max_length=512)
+    title_in    = ui.TextInput(label="Title",                         placeholder="order confirmation 🎫",                                                   max_length=256,  required=True)
+    description = ui.TextInput(label="Description",                   placeholder="⚜ buyer: {buyer}\n⚜ item: {item}\n⚜ amount: {amount}", style=discord.TextStyle.paragraph, max_length=4000, required=True)
+    footer      = ui.TextInput(label="Footer (optional)",                                                                                                     required=False,  max_length=2048)
+    color       = ui.TextInput(label="Color hex (e.g. #5865F2)",     default="#5865F2",                                                                       required=False,  max_length=9)
+    image_url   = ui.TextInput(label="Image / GIF URL (optional)",   placeholder="https://…",                                                                 required=False,  max_length=512)
 
     def __init__(self, state: SetupState, cog):
         super().__init__()
@@ -449,8 +427,6 @@ class EmbedConfirmModal(ui.Modal, title="🎨 Confirmation — Embed Message"):
         await interaction.response.edit_message(embed=_step1_embed(self.state), view=Step1ConfirmMsgView(self.state, self.cog))
 
 
-# ── Step 1 View ────────────────────────────────────────────────────────────────
-
 class Step1ConfirmMsgView(ui.View):
     def __init__(self, state: SetupState, cog):
         super().__init__(timeout=300)
@@ -460,8 +436,8 @@ class Step1ConfirmMsgView(ui.View):
         sel = ui.Select(
             placeholder="Set message type (Text or Embed)…",
             options=[
-                discord.SelectOption(label="Text",  value="text",  emoji="📝", description="Plain text + optional image"),
-                discord.SelectOption(label="Embed", value="embed", emoji="🎨", description="Rich embed with image support"),
+                discord.SelectOption(label="Text",  value="text",  emoji="📝"),
+                discord.SelectOption(label="Embed", value="embed", emoji="🎨"),
             ],
             row=0,
         )
@@ -559,6 +535,7 @@ class Step2ConfirmButtonsView(ui.View):
         super().__init__(timeout=300)
         self.state = state
         self.cog   = cog
+
         sel = ui.Select(
             placeholder="Button actions…",
             options=[
@@ -570,15 +547,16 @@ class Step2ConfirmButtonsView(ui.View):
         sel.callback = self._on_select
         self.add_item(sel)
 
-        restricted  = state.cfg.get("confirm_btn_restricted", True)
-        perm_label  = "🔒 Admin only" if restricted else "🌐 Everyone can click"
-        perm_btn    = ui.Button(label=perm_label, style=discord.ButtonStyle.secondary, row=1)
+        restricted = state.cfg.get("confirm_btn_restricted", True)
+        perm_label = "🔒 Admin only" if restricted else "🌐 Everyone can click"
+        perm_btn   = ui.Button(label=perm_label, style=discord.ButtonStyle.secondary, row=1)
         perm_btn.callback = self._toggle_restricted
         self.add_item(perm_btn)
 
         back = ui.Button(label="↩️ Back", style=discord.ButtonStyle.secondary, row=1)
         back.callback = self._back
         self.add_item(back)
+
         nxt = ui.Button(label="Next ▶️", style=discord.ButtonStyle.primary, row=1)
         nxt.callback = self._next
         self.add_item(nxt)
@@ -611,12 +589,12 @@ class Step2ConfirmButtonsView(ui.View):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WIZARD — STEP 3: FOLLOW-UP MESSAGES  (image + ephemeral)
+# WIZARD — STEP 3: FOLLOW-UP MESSAGES
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _step3_embed(state: SetupState) -> discord.Embed:
-    msgs       = state.cfg.get("followup_messages", [])
-    ephemeral  = state.cfg.get("followup_ephemeral", False)
+    msgs      = state.cfg.get("followup_messages", [])
+    ephemeral = state.cfg.get("followup_ephemeral", False)
 
     def _preview(m: dict) -> str:
         t   = m.get("type", "text")
@@ -642,8 +620,8 @@ def _step3_embed(state: SetupState) -> discord.Embed:
 
 
 class AddFollowupTextModal(ui.Modal, title="📝 Follow-up — Text Message"):
-    content   = ui.TextInput(label="Message Content", placeholder="{buyer}\n\nWHERE TO PAY?…", style=discord.TextStyle.paragraph, max_length=2000, required=True)
-    image_url = ui.TextInput(label="Image / GIF URL (optional)", placeholder="https://…", required=False, max_length=512)
+    content   = ui.TextInput(label="Message Content",              placeholder="{buyer}\n\nWHERE TO PAY?…", style=discord.TextStyle.paragraph, max_length=2000, required=True)
+    image_url = ui.TextInput(label="Image / GIF URL (optional)",   placeholder="https://…",                 required=False,                    max_length=512)
 
     def __init__(self, state: SetupState, cog):
         super().__init__()
@@ -661,9 +639,9 @@ class AddFollowupTextModal(ui.Modal, title="📝 Follow-up — Text Message"):
 
 
 class AddFollowupEmbedModal(ui.Modal, title="🎨 Follow-up — Embed Message"):
-    title_in    = ui.TextInput(label="Title (optional)",           required=False, max_length=256)
+    title_in    = ui.TextInput(label="Title (optional)",           required=False,    max_length=256)
     description = ui.TextInput(label="Description",                style=discord.TextStyle.paragraph, max_length=4000, required=True)
-    footer      = ui.TextInput(label="Footer (optional)",          required=False, max_length=2048)
+    footer      = ui.TextInput(label="Footer (optional)",          required=False,    max_length=2048)
     color       = ui.TextInput(label="Color hex",                  default="#5865F2", required=False, max_length=9)
     image_url   = ui.TextInput(label="Image / GIF URL (optional)", placeholder="https://…", required=False, max_length=512)
 
@@ -712,6 +690,7 @@ class Step3FollowupMsgsView(ui.View):
         back = ui.Button(label="↩️ Back", style=discord.ButtonStyle.secondary, row=1)
         back.callback = self._back
         self.add_item(back)
+
         nxt = ui.Button(label="Next ▶️", style=discord.ButtonStyle.primary, row=1)
         nxt.callback = self._next
         self.add_item(nxt)
@@ -849,7 +828,7 @@ class Step4FollowupButtonsView(ui.View):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WIZARD — STEP 5: DM MESSAGE  (image + no ephemeral — DMs are already private)
+# WIZARD — STEP 5: DM MESSAGE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _step5_embed(state: SetupState) -> discord.Embed:
@@ -877,7 +856,7 @@ def _step5_embed(state: SetupState) -> discord.Embed:
             "Sent as a DM when a confirm button is clicked. DMs are private by nature.\n"
             f"Placeholders: {PLACEHOLDERS_HINT}\n\n"
             f"**Current type:** `{dm_type or 'none'}`\n"
-            f"**Image/GIF URL:** {image}\n"
+            f"**Image/GIF:** {image}\n"
             f"**Preview:** {preview}\n\n"
             f"**DM Buttons ({len(dm_btns)}/5):**\n{btn_list}\n\n"
             f"**DM Failed Message** *(posted in channel if buyer DMs are closed):*\n{failed_prev}"
@@ -907,9 +886,9 @@ class DMTextModal(ui.Modal, title="📝 DM Message — Text"):
 
 
 class DMEmbedModal(ui.Modal, title="🎨 DM Message — Embed"):
-    title_in    = ui.TextInput(label="Title (optional)",           required=False,  max_length=256)
+    title_in    = ui.TextInput(label="Title (optional)",           required=False,    max_length=256)
     description = ui.TextInput(label="Description",                style=discord.TextStyle.paragraph, max_length=4000, required=True)
-    footer      = ui.TextInput(label="Footer (optional)",          required=False,  max_length=2048)
+    footer      = ui.TextInput(label="Footer (optional)",          required=False,    max_length=2048)
     color       = ui.TextInput(label="Color hex",                  default="#57F287", required=False, max_length=9)
     image_url   = ui.TextInput(label="Image / GIF URL (optional)", placeholder="https://…", required=False, max_length=512)
 
@@ -926,12 +905,12 @@ class DMEmbedModal(ui.Modal, title="🎨 DM Message — Embed"):
 
     async def on_submit(self, interaction: discord.Interaction):
         cfg = self.state.cfg
-        cfg["dm_msg_type"]    = "embed"
-        cfg["dm_embed_title"] = self.title_in.value.strip()
-        cfg["dm_embed_desc"]  = self.description.value.strip()
-        cfg["dm_embed_footer"]= self.footer.value.strip()
-        cfg["dm_embed_color"] = _parse_color(self.color.value)
-        cfg["dm_image_url"]   = self.image_url.value.strip()
+        cfg["dm_msg_type"]     = "embed"
+        cfg["dm_embed_title"]  = self.title_in.value.strip()
+        cfg["dm_embed_desc"]   = self.description.value.strip()
+        cfg["dm_embed_footer"] = self.footer.value.strip()
+        cfg["dm_embed_color"]  = _parse_color(self.color.value)
+        cfg["dm_image_url"]    = self.image_url.value.strip()
         await interaction.response.edit_message(embed=_step5_embed(self.state), view=Step5DMView(self.state, self.cog))
 
 
@@ -984,12 +963,12 @@ class Step5DMView(ui.View):
     @ui.select(
         placeholder="Configure DM message…",
         options=[
-            discord.SelectOption(label="Set Text DM",           value="dm_text",    emoji="📝"),
-            discord.SelectOption(label="Set Embed DM",          value="dm_embed",   emoji="🎨"),
-            discord.SelectOption(label="Add DM URL Button",     value="add_btn",    emoji="➕"),
-            discord.SelectOption(label="Clear DM Buttons",      value="clear_btn",  emoji="🗑️"),
-            discord.SelectOption(label="Set DM Failed Message", value="dm_failed",  emoji="⚠️", description="Message posted if buyer DMs are closed"),
-            discord.SelectOption(label="No DM (skip)",          value="skip",       emoji="⏭️"),
+            discord.SelectOption(label="Set Text DM",           value="dm_text",   emoji="📝"),
+            discord.SelectOption(label="Set Embed DM",          value="dm_embed",  emoji="🎨"),
+            discord.SelectOption(label="Add DM URL Button",     value="add_btn",   emoji="➕"),
+            discord.SelectOption(label="Clear DM Buttons",      value="clear_btn", emoji="🗑️"),
+            discord.SelectOption(label="Set DM Failed Message", value="dm_failed", emoji="⚠️", description="Message posted if buyer DMs are closed"),
+            discord.SelectOption(label="No DM (skip)",          value="skip",      emoji="⏭️"),
         ],
         row=0,
     )
@@ -1010,9 +989,9 @@ class Step5DMView(ui.View):
         elif choice == "dm_failed":
             await interaction.response.send_modal(DMFailedModal(self.state, self.cog))
         elif choice == "skip":
-            self.state.cfg["dm_msg_type"] = ""
-            self.state.cfg["dm_content"]  = ""
-            self.state.cfg["dm_image_url"]= ""
+            self.state.cfg["dm_msg_type"]  = ""
+            self.state.cfg["dm_content"]   = ""
+            self.state.cfg["dm_image_url"] = ""
             await interaction.response.edit_message(embed=_step5_embed(self.state), view=Step5DMView(self.state, self.cog))
 
     @ui.button(label="📎 Upload DM Image", style=discord.ButtonStyle.secondary, row=1)
@@ -1042,7 +1021,8 @@ class Step5DMView(ui.View):
                 f"**Confirm Message:** {cfg.get('confirm_msg_type', 'embed').title()} "
                 f"{'🖼️' if cfg.get('confirm_image_url') else ''} "
                 f"{'🔒 Ephemeral' if cfg.get('confirm_ephemeral') else '🔓 Public'}\n"
-                f"**Confirm Buttons:** {len(cfg.get('confirm_buttons', []))}\n"
+                f"**Confirm Buttons:** {len(cfg.get('confirm_buttons', []))} "
+                f"({'🔒 Admin only' if cfg.get('confirm_btn_restricted', True) else '🌐 Everyone'})\n"
                 f"**Follow-up Messages:** {len(cfg.get('followup_messages', []))} "
                 f"{'🔒 Ephemeral' if cfg.get('followup_ephemeral') else '🔓 Public'}\n"
                 f"**Follow-up Buttons:** {len(cfg.get('followup_buttons', []))}\n"
@@ -1077,8 +1057,7 @@ def _build_confirm_view(order_id: str, cfg: dict) -> discord.ui.View:
     return v
 
 
-def _make_confirm_sendable(cfg: dict, ph: dict) -> tuple[Optional[str], Optional[discord.Embed]]:
-    """Return (content, embed) for the confirmation message."""
+def _make_confirm_sendable(cfg: dict, ph: dict) -> tuple:
     img = cfg.get("confirm_image_url", "")
     if cfg.get("confirm_msg_type") == "embed":
         e = _build_embed(
@@ -1093,22 +1072,19 @@ def _make_confirm_sendable(cfg: dict, ph: dict) -> tuple[Optional[str], Optional
     else:
         content = _apply_ph(cfg.get("confirm_content", "") or "", ph)
         if img and _is_valid_url(img):
-            # Wrap text + image in a minimal embed (Discord can't show images in plain text)
             return None, _make_text_embed_with_image(content, img, ph)
         return (content or "\u200b"), None
 
 
 async def _send_followup_msg(
     interaction: discord.Interaction,
-    channel: discord.abc.Messageable,
+    channel,
     msg: dict,
     view: Optional[discord.ui.View],
     ph: dict,
     ephemeral: bool,
 ) -> None:
-    """Send one follow-up message, respecting ephemeral and image settings."""
     img = msg.get("image_url", "") or ""
-
     if msg.get("type") == "embed":
         e = _build_embed(
             msg.get("embed_title",  "") or "",
@@ -1130,12 +1106,11 @@ async def _send_followup_msg(
                 await interaction.followup.send(embed=e, view=view, ephemeral=True)
             else:
                 await channel.send(embed=e, view=view)
-        else:
-            if content:
-                if ephemeral:
-                    await interaction.followup.send(content=content, view=view, ephemeral=True)
-                else:
-                    await channel.send(content=content, view=view)
+        elif content:
+            if ephemeral:
+                await interaction.followup.send(content=content, view=view, ephemeral=True)
+            else:
+                await channel.send(content=content, view=view)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1143,16 +1118,12 @@ async def _send_followup_msg(
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def _do_confirm_action(interaction: discord.Interaction, order_id: str) -> None:
-    """Core logic run when a confirm button is clicked."""
-
     # ── Permission ────────────────────────────────────────────────────────────
-    # Load the config early enough to check restriction setting
     _early_order = _load_order(order_id)
     _early_cfg   = _load_cfg(_early_order["guild_id"], _early_order["order_type"]) if _early_order else {}
     restricted   = _early_cfg.get("confirm_btn_restricted", True)
+    is_owner     = interaction.user.id == BOT_OWNER_ID
 
-    # Bot owner bypass is always silent; for restricted=True require admin
-    is_owner = interaction.user.id == BOT_OWNER_ID
     if restricted and not is_owner and not _is_admin(interaction):
         try:
             await interaction.response.send_message("❌ Only administrators can use this button.", ephemeral=True)
@@ -1182,7 +1153,6 @@ async def _do_confirm_action(interaction: discord.Interaction, order_id: str) ->
     except Exception:
         pass
 
-    # Mark confirmed immediately (prevents race / double-click)
     _mark_order_confirmed(order_id)
 
     # ── Disable original confirm buttons ──────────────────────────────────────
@@ -1200,24 +1170,23 @@ async def _do_confirm_action(interaction: discord.Interaction, order_id: str) ->
     except Exception:
         pass
 
-    cfg = _load_cfg(order_doc["guild_id"], order_doc["order_type"])
-    ph  = order_doc.get("ph", {})
-    channel        = interaction.channel
-    ephemeral_fu   = cfg.get("followup_ephemeral", False)
-    followup_msgs  = cfg.get("followup_messages", [])
-    followup_view  = _build_link_view(cfg.get("followup_buttons", []))
+    cfg           = _load_cfg(order_doc["guild_id"], order_doc["order_type"])
+    ph            = order_doc.get("ph", {})
+    channel       = interaction.channel
+    ephemeral_fu  = cfg.get("followup_ephemeral", False)
+    followup_msgs = cfg.get("followup_messages", [])
+    followup_view = _build_link_view(cfg.get("followup_buttons", []))
 
     # ── Send follow-up messages ───────────────────────────────────────────────
     for i, msg in enumerate(followup_msgs):
-        is_last  = i == len(followup_msgs) - 1
-        view     = followup_view if (is_last and followup_view) else None
+        is_last = i == len(followup_msgs) - 1
+        view    = followup_view if (is_last and followup_view) else None
         try:
             await _send_followup_msg(interaction, channel, msg, view, ph, ephemeral_fu)
         except discord.HTTPException as exc:
             print(f"[Order] Follow-up send error: {exc}")
         await asyncio.sleep(0.3)
 
-    # If no follow-up messages but we have buttons, post them on their own
     if not followup_msgs and followup_view:
         try:
             if ephemeral_fu:
@@ -1260,7 +1229,10 @@ async def _do_confirm_action(interaction: discord.Interaction, order_id: str) ->
                 pass
 
         except discord.Forbidden:
-            failed_msg = _apply_ph(cfg.get("dm_failed_msg", "") or "⚠️ {buyer} DMs are closed — please send payment details manually.", ph)
+            failed_msg = _apply_ph(
+                cfg.get("dm_failed_msg", "") or "⚠️ {buyer} DMs are closed — please send payment details manually.",
+                ph,
+            )
             try:
                 await channel.send(failed_msg, delete_after=10)
             except Exception:
@@ -1279,7 +1251,7 @@ async def _do_confirm_action(interaction: discord.Interaction, order_id: str) ->
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ORDER EXECUTION — POST CONFIRMATION
+# ORDER EXECUTION — POST CONFIRMATION MESSAGE
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def _post_order(interaction: discord.Interaction, cfg: dict, ph: dict, order_id: str) -> None:
@@ -1319,8 +1291,7 @@ class OrderCog(commands.Cog):
         parts = cid.split(":")
         if len(parts) < 3:
             return
-        order_id = parts[1]
-        asyncio.create_task(_do_confirm_action(interaction, order_id))
+        asyncio.create_task(_do_confirm_action(interaction, parts[1]))
 
     # ── Command group ─────────────────────────────────────────────────────────
 
@@ -1334,13 +1305,7 @@ class OrderCog(commands.Cog):
         await interaction.response.send_message(embed=_main_menu_embed(), view=MainMenuView(self), ephemeral=True)
 
     @order_group.command(name="premium", description="Send a premium account order")
-    @app_commands.describe(
-        email="Account email",
-        password="Account password",
-        profile="Profile name or slot number",
-        order="Order description",
-        buyer="Buyer to mention and DM",
-    )
+    @app_commands.describe(email="Account email", password="Account password", profile="Profile name or slot", order="Order description", buyer="Buyer to mention and DM")
     async def order_premium(self, interaction: discord.Interaction, email: str, password: str, profile: str, order: str, buyer: discord.Member):
         if not _is_admin(interaction):
             await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
