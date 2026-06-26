@@ -635,6 +635,8 @@ class NeronielBot(commands.Bot):
             "bot.cogs.anti_unwl",
             # Automod command cog
             "bot.cogs.automod_cmd",
+            # Order commands
+            "bot.cogs.order",
             # Antinuke event listeners
             "bot.antinuke.antiban",
             "bot.antinuke.antikick",
