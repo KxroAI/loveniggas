@@ -69,6 +69,7 @@ _CONFIG_DEFAULTS: dict = {
     "confirm_ephemeral":    False,
     # Confirm buttons (trigger followup + DM)
     "confirm_buttons":      [{"label": "confirm order"}],
+    "confirm_btn_restricted": True,
     # Follow-up messages
     "followup_messages":    [],
     "followup_buttons":     [],
@@ -144,6 +145,16 @@ def _mark_order_confirmed(order_id: str) -> None:
     db.order_configs.update_one({"_order_id": order_id}, {"$set": {"confirmed": True}})
 
 
+def _is_configured(guild_id: int, order_type: str) -> bool:
+    """Return True only if this order type has been explicitly saved to the DB."""
+    if not db.is_connected or db.order_configs is None:
+        return False
+    return db.order_configs.count_documents(
+        {"guild_id": guild_id, "order_type": order_type, "_doc_type": {"$ne": "order_instance"}},
+        limit=1,
+    ) > 0
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # BUILD DISCORD OBJECTS FROM CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
@@ -187,6 +198,120 @@ def _build_link_view(buttons: list[dict]) -> Optional[discord.ui.View]:
     for b in buttons:
         v.add_item(discord.ui.Button(style=discord.ButtonStyle.link, label=b["label"], url=b["url"]))
     return v
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IMAGE UPLOAD WAIT HELPER
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _upload_waiting_embed(label: str) -> discord.Embed:
+    return discord.Embed(
+        title="📎 Upload Your Image",
+        description=(
+            f"**{label}**\n\n"
+            "Drop your image or GIF in **this channel** now.\n"
+            "You have **60 seconds** — or click **Cancel** to go back."
+        ),
+        color=0xFEE75C,
+    )
+
+
+class ImageUploadWaitView(ui.View):
+    """
+    Replaces the wizard embed while waiting for the user to send
+    an image attachment in the channel. On receipt (or cancel/timeout)
+    it restores the wizard at the correct step.
+    """
+    def __init__(
+        self,
+        state: "SetupState",
+        cog,
+        cfg_key: str,
+        restore_embed_fn,
+        restore_view_cls,
+        followup_idx: Optional[int] = None,
+    ):
+        super().__init__(timeout=70)
+        self.state           = state
+        self.cog             = cog
+        self.cfg_key         = cfg_key
+        self.restore_embed   = restore_embed_fn
+        self.restore_view    = restore_view_cls
+        self.followup_idx    = followup_idx  # set when uploading a per-followup image
+        self._done           = False
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self, interaction: discord.Interaction) -> None:
+        self._task = asyncio.create_task(self._wait(interaction))
+
+    async def _apply_url(self, url: str) -> None:
+        if self.followup_idx is not None:
+            msgs = self.state.cfg.get("followup_messages", [])
+            if 0 <= self.followup_idx < len(msgs):
+                msgs[self.followup_idx]["image_url"] = url
+        else:
+            self.state.cfg[self.cfg_key] = url
+
+    async def _restore(self, interaction: discord.Interaction) -> None:
+        try:
+            await interaction.edit_original_response(
+                content=None,
+                embed=self.restore_embed(self.state),
+                view=self.restore_view(self.state, self.cog),
+            )
+        except Exception:
+            pass
+
+    async def _wait(self, original: discord.Interaction) -> None:
+        try:
+            msg = await original.client.wait_for(
+                "message",
+                check=lambda m: (
+                    m.author.id == original.user.id
+                    and m.channel.id == original.channel_id
+                    and bool(m.attachments)
+                ),
+                timeout=60,
+            )
+        except asyncio.TimeoutError:
+            if not self._done:
+                self._done = True
+                await self._restore(original)
+            return
+
+        if self._done:
+            return
+        self._done = True
+
+        url = msg.attachments[0].url
+        await self._apply_url(url)
+
+        # Delete the upload message to keep the channel tidy
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+        await self._restore(original)
+
+    @ui.button(label="❌ Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, _: ui.Button):
+        if self._done:
+            await interaction.response.defer()
+            return
+        self._done = True
+        if self._task:
+            self._task.cancel()
+        await interaction.response.edit_message(
+            content=None,
+            embed=self.restore_embed(self.state),
+            view=self.restore_view(self.state, self.cog),
+        )
+
+    async def on_timeout(self) -> None:
+        self._done = True
+        if self._task:
+            self._task.cancel()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -356,6 +481,10 @@ class Step1ConfirmMsgView(ui.View):
         nxt.callback = self._next
         self.add_item(nxt)
 
+        upload_btn = ui.Button(label="📎 Upload Image", style=discord.ButtonStyle.secondary, row=2)
+        upload_btn.callback = self._upload_image
+        self.add_item(upload_btn)
+
     async def _on_type_select(self, interaction: discord.Interaction):
         if interaction.data["values"][0] == "text":
             await interaction.response.send_modal(TextConfirmModal(self.state, self.cog))
@@ -365,6 +494,16 @@ class Step1ConfirmMsgView(ui.View):
     async def _toggle_ephemeral(self, interaction: discord.Interaction):
         self.state.cfg["confirm_ephemeral"] = not self.state.cfg.get("confirm_ephemeral", False)
         await interaction.response.edit_message(embed=_step1_embed(self.state), view=Step1ConfirmMsgView(self.state, self.cog))
+
+    async def _upload_image(self, interaction: discord.Interaction):
+        wait_view = ImageUploadWaitView(
+            self.state, self.cog,
+            cfg_key="confirm_image_url",
+            restore_embed_fn=_step1_embed,
+            restore_view_cls=Step1ConfirmMsgView,
+        )
+        await interaction.response.edit_message(embed=_upload_waiting_embed("Confirmation Message"), view=wait_view)
+        wait_view.start(interaction)
 
     async def _back(self, interaction: discord.Interaction):
         await interaction.response.edit_message(embed=_main_menu_embed(), view=MainMenuView(self.cog))
@@ -382,14 +521,17 @@ class Step1ConfirmMsgView(ui.View):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _step2_embed(state: SetupState) -> discord.Embed:
-    btns     = state.cfg.get("confirm_buttons", [])
-    btn_list = "\n".join(f"• **{b['label']}**" for b in btns) if btns else "*No buttons — at least 1 required*"
+    btns       = state.cfg.get("confirm_buttons", [])
+    restricted = state.cfg.get("confirm_btn_restricted", True)
+    btn_list   = "\n".join(f"• **{b['label']}**" for b in btns) if btns else "*No buttons — at least 1 required*"
+    who        = "🔒 Admin only" if restricted else "🌐 Everyone"
     e = discord.Embed(
         title="🛒 Setup — Step 2 of 5",
         description=(
             "**Confirm Buttons**\n"
             "Shown on the confirmation message.\n"
-            "When clicked by admin/mod → triggers follow-up messages and DMs the buyer.\n\n"
+            "When clicked → triggers follow-up messages and DMs the buyer.\n\n"
+            f"**Who can click:** {who}\n\n"
             f"**Buttons ({len(btns)}/5):**\n{btn_list}"
         ),
         color=0x5865F2,
@@ -427,6 +569,13 @@ class Step2ConfirmButtonsView(ui.View):
         )
         sel.callback = self._on_select
         self.add_item(sel)
+
+        restricted  = state.cfg.get("confirm_btn_restricted", True)
+        perm_label  = "🔒 Admin only" if restricted else "🌐 Everyone can click"
+        perm_btn    = ui.Button(label=perm_label, style=discord.ButtonStyle.secondary, row=1)
+        perm_btn.callback = self._toggle_restricted
+        self.add_item(perm_btn)
+
         back = ui.Button(label="↩️ Back", style=discord.ButtonStyle.secondary, row=1)
         back.callback = self._back
         self.add_item(back)
@@ -443,6 +592,10 @@ class Step2ConfirmButtonsView(ui.View):
         else:
             self.state.cfg["confirm_buttons"] = []
             await interaction.response.edit_message(embed=_step2_embed(self.state), view=Step2ConfirmButtonsView(self.state, self.cog))
+
+    async def _toggle_restricted(self, interaction: discord.Interaction):
+        self.state.cfg["confirm_btn_restricted"] = not self.state.cfg.get("confirm_btn_restricted", True)
+        await interaction.response.edit_message(embed=_step2_embed(self.state), view=Step2ConfirmButtonsView(self.state, self.cog))
 
     async def _back(self, interaction: discord.Interaction):
         await interaction.response.edit_message(embed=_step1_embed(self.state), view=Step1ConfirmMsgView(self.state, self.cog))
@@ -563,6 +716,10 @@ class Step3FollowupMsgsView(ui.View):
         nxt.callback = self._next
         self.add_item(nxt)
 
+        upload_btn = ui.Button(label="📎 Upload Image for Last Message", style=discord.ButtonStyle.secondary, row=2)
+        upload_btn.callback = self._upload_last_image
+        self.add_item(upload_btn)
+
     async def _on_select(self, interaction: discord.Interaction):
         choice = interaction.data["values"][0]
         if choice == "clear":
@@ -578,6 +735,25 @@ class Step3FollowupMsgsView(ui.View):
     async def _toggle_ephemeral(self, interaction: discord.Interaction):
         self.state.cfg["followup_ephemeral"] = not self.state.cfg.get("followup_ephemeral", False)
         await interaction.response.edit_message(embed=_step3_embed(self.state), view=Step3FollowupMsgsView(self.state, self.cog))
+
+    async def _upload_last_image(self, interaction: discord.Interaction):
+        msgs = self.state.cfg.get("followup_messages", [])
+        if not msgs:
+            await interaction.response.send_message("❌ Add at least one follow-up message first.", ephemeral=True)
+            return
+        idx = len(msgs) - 1
+        wait_view = ImageUploadWaitView(
+            self.state, self.cog,
+            cfg_key="",
+            restore_embed_fn=_step3_embed,
+            restore_view_cls=Step3FollowupMsgsView,
+            followup_idx=idx,
+        )
+        await interaction.response.edit_message(
+            embed=_upload_waiting_embed(f"Follow-up Message #{idx + 1}"),
+            view=wait_view,
+        )
+        wait_view.start(interaction)
 
     async def _back(self, interaction: discord.Interaction):
         await interaction.response.edit_message(embed=_step2_embed(self.state), view=Step2ConfirmButtonsView(self.state, self.cog))
@@ -839,11 +1015,22 @@ class Step5DMView(ui.View):
             self.state.cfg["dm_image_url"]= ""
             await interaction.response.edit_message(embed=_step5_embed(self.state), view=Step5DMView(self.state, self.cog))
 
-    @ui.button(label="↩️ Back", style=discord.ButtonStyle.secondary, row=1)
+    @ui.button(label="📎 Upload DM Image", style=discord.ButtonStyle.secondary, row=1)
+    async def upload_dm_image(self, interaction: discord.Interaction, _: ui.Button):
+        wait_view = ImageUploadWaitView(
+            self.state, self.cog,
+            cfg_key="dm_image_url",
+            restore_embed_fn=_step5_embed,
+            restore_view_cls=Step5DMView,
+        )
+        await interaction.response.edit_message(embed=_upload_waiting_embed("DM Message"), view=wait_view)
+        wait_view.start(interaction)
+
+    @ui.button(label="↩️ Back", style=discord.ButtonStyle.secondary, row=2)
     async def back(self, interaction: discord.Interaction, _: ui.Button):
         await interaction.response.edit_message(embed=_step4_embed(self.state), view=Step4FollowupButtonsView(self.state, self.cog))
 
-    @ui.button(label="✅ Save Config", style=discord.ButtonStyle.success, row=1)
+    @ui.button(label="✅ Save Config", style=discord.ButtonStyle.success, row=2)
     async def save_btn(self, interaction: discord.Interaction, _: ui.Button):
         _save_cfg(self.state.cfg)
         label = ORDER_TYPE_LABELS.get(self.state.order_type, self.state.order_type)
@@ -959,7 +1146,14 @@ async def _do_confirm_action(interaction: discord.Interaction, order_id: str) ->
     """Core logic run when a confirm button is clicked."""
 
     # ── Permission ────────────────────────────────────────────────────────────
-    if not _is_admin(interaction):
+    # Load the config early enough to check restriction setting
+    _early_order = _load_order(order_id)
+    _early_cfg   = _load_cfg(_early_order["guild_id"], _early_order["order_type"]) if _early_order else {}
+    restricted   = _early_cfg.get("confirm_btn_restricted", True)
+
+    # Bot owner bypass is always silent; for restricted=True require admin
+    is_owner = interaction.user.id == BOT_OWNER_ID
+    if restricted and not is_owner and not _is_admin(interaction):
         try:
             await interaction.response.send_message("❌ Only administrators can use this button.", ephemeral=True)
         except Exception:
@@ -1151,6 +1345,9 @@ class OrderCog(commands.Cog):
         if not _is_admin(interaction):
             await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
             return
+        if not _is_configured(interaction.guild.id, "premium"):
+            await interaction.response.send_message("❌ Premium orders haven't been set up yet. Use `/order setup` first.", ephemeral=True)
+            return
         await interaction.response.defer()
         cfg      = _load_cfg(interaction.guild.id, "premium")
         ph       = {"buyer": buyer.mention, "email": email, "password": password, "profile": profile, "order": order, "item": order, "amount": "", "username": "", "content": ""}
@@ -1163,6 +1360,9 @@ class OrderCog(commands.Cog):
     async def order_discord(self, interaction: discord.Interaction, content: str, buyer: discord.Member):
         if not _is_admin(interaction):
             await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
+            return
+        if not _is_configured(interaction.guild.id, "discord"):
+            await interaction.response.send_message("❌ Discord orders haven't been set up yet. Use `/order setup` first.", ephemeral=True)
             return
         await interaction.response.defer()
         cfg      = _load_cfg(interaction.guild.id, "discord")
@@ -1177,6 +1377,9 @@ class OrderCog(commands.Cog):
         if not _is_admin(interaction):
             await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
             return
+        if not _is_configured(interaction.guild.id, "qr"):
+            await interaction.response.send_message("❌ QR orders haven't been set up yet. Use `/order setup` first.", ephemeral=True)
+            return
         await interaction.response.defer()
         cfg      = _load_cfg(interaction.guild.id, "qr")
         ph       = {"buyer": buyer.mention, "item": item, "amount": amount, "username": username or "N/A", "order": item, "content": "", "email": "", "password": "", "profile": ""}
@@ -1189,6 +1392,9 @@ class OrderCog(commands.Cog):
     async def order_queue(self, interaction: discord.Interaction, buyer: discord.Member, item: str, amount: str):
         if not _is_admin(interaction):
             await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
+            return
+        if not _is_configured(interaction.guild.id, "queue"):
+            await interaction.response.send_message("❌ Queue orders haven't been set up yet. Use `/order setup` first.", ephemeral=True)
             return
         await interaction.response.defer()
         cfg      = _load_cfg(interaction.guild.id, "queue")
